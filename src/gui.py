@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # src/gui.py — フィルター機能付き
-import re
+import datetime, re
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 from pathlib import Path
 from typing import List, Optional
 
-from editor import load_csv, replace_cell, save_csv
+from editor import load_csv, save_csv
 
 # どの列を “コード列” として表示・フィルター対象にするか
 DISPLAY_COL = 0   # 先頭列
@@ -27,14 +27,23 @@ class UKEEditorGUI(tk.Tk):
         btn_frame = tk.Frame(self)
         btn_frame.pack(pady=6)
         tk.Button(btn_frame, text="リネーム", width=10,
-                  command=self.rename_files).grid(row=0, column=0, padx=6)
+            command=self.rename_files).grid(row=0, column=0, padx=6)
         tk.Button(btn_frame, text="ファイル読み込み", width=14,
-                  command=self.load_file).grid(row=0, column=1, padx=6)
+            command=self.load_file).grid(row=0, column=1, padx=6)
         tk.Button(btn_frame, text="患者コード検索", width=14,
-                  command=self.search_patient_code).grid(row=0, column=2, padx=6)
+            command=self.search_patient_code).grid(row=0, column=2, padx=6)
         tk.Button(btn_frame, text="全行表示", width=10,
-          command=lambda: (self.row_lb.selection_clear(0, tk.END),
-                           self.filter_by_code(None))).grid(row=0, column=3, padx=6)
+            command=lambda: (self.row_lb.selection_clear(0, tk.END),
+            self.filter_by_code(None))).grid(row=0, column=3, padx=6)
+        tk.Button(btn_frame, text="ハイライト解除", width=12,
+            command=self.clear_highlight).grid(row=0, column=4, padx=6)
+        
+        tk.Button(btn_frame, text="設定", width=10,
+            command=self.open_settings).grid(row=1, column=0, padx=6)
+        tk.Button(
+            btn_frame, text="コード変換して保存", width=14,
+            command=self.convert_and_save
+        ).grid(row=1, column=1, columnspan=1, padx=6)
 
         # === リスト表示 ===
         list_frame = tk.Frame(self)
@@ -43,6 +52,7 @@ class UKEEditorGUI(tk.Tk):
         self.row_lb.pack(side=tk.LEFT, fill=tk.Y, padx=(10, 0))
         tk.Label(list_frame, text="コード").pack(side=tk.LEFT, anchor=tk.NW)
         self.row_lb.bind("<<ListboxSelect>>", self.filter_by_code)
+
         # Text へ置換（行単位の開始オフセットを保存）
         self.row_text = tk.Text(list_frame, wrap="none", width=120, height=25)
         self.row_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -53,6 +63,18 @@ class UKEEditorGUI(tk.Tk):
 
         # 行頭インデックス（"1.0", "2.0", …）を保持
         self.line_starts: list[str] = []
+
+        # 患者コード桁数（デフォルト 10）
+        self.patient_code_len: int = 10
+        
+        # 変換用桁数
+        self.patient_code_conv_len: int = 10
+
+        # 後方カンマ設定（デフォルト　２）
+        self.trailing_commas: int = 2 
+
+        # 現在有効なハイライト正規表現
+        self.highlight_pat: re.Pattern | None = None
 
         # === ステータスバー ===
         self.status = tk.StringVar(value="ファイル未選択")
@@ -105,7 +127,6 @@ class UKEEditorGUI(tk.Tk):
         self.refresh_text_only()
         self.status.set(f"フィルター: {code} ({len(self.display_indices)} 行)")
 
-
     def refresh_text_only(self):
         self.row_text.config(state=tk.NORMAL)
         self.row_text.delete("1.0", tk.END)
@@ -115,6 +136,7 @@ class UKEEditorGUI(tk.Tk):
             self.line_starts.append(self.row_text.index(tk.INSERT))
             self.row_text.insert(tk.END, row_string + "\n")
         self.row_text.config(state=tk.DISABLED)
+        self._apply_highlight_to_current_view()
 
     def refresh_lists(self):
         if not self.display_indices:
@@ -139,87 +161,109 @@ class UKEEditorGUI(tk.Tk):
             self.line_starts.append(self.row_text.index(tk.INSERT))
             self.row_text.insert(tk.END, row_string + "\n")
         self.row_text.config(state=tk.DISABLED)
-
-    # ---------- セル置換 ----------
-    def run_replace(self):
-        if not self.file_path:
-            messagebox.showwarning("警告", "まず CSV ファイルを読み込んでください。")
-            return
-        row_sel = self.row_lb.curselection()
-        if not row_sel:
-            messagebox.showwarning("警告", "まずコード列を選択してください。")
-            return
-        row_i = self.display_indices[row_sel[0]]  # 実際の行番号
-
-        col_i = simpledialog.askinteger("列番号入力", "置換したい列番号を入力（0 始まり）")
-        if col_i is None:
-            return
-        new_val = simpledialog.askstring("新しい値", f"行 {row_i}, 列 {col_i} を何に置換しますか？")
-        if new_val is None:
-            return
-
-        try:
-            replace_cell(self.rows, row_i, col_i, new_val)
-            if col_i == DISPLAY_COL:  # 表示列が変わった場合はリストも更新
-                self.refresh_lists()
-            out_path = save_csv(self.file_path, self.rows)
-            messagebox.showinfo("完了", f"編集後ファイルを保存しました：\n{out_path}")
-            self.status.set(f"保存完了: {out_path.name}")
-        except Exception as e:
-            messagebox.showerror("エラー", str(e))
+        self._apply_highlight_to_current_view()
 
     # ---------- 患者コード検索（全マッチをハイライト） ----------
     def search_patient_code(self):
-        """
-        ,XXXXXXXXXX, 形式 (10桁数値) を含むすべての箇所を
-        Text ウィジェット上で黄色ハイライト。
-        既存ハイライトがあればまず除去する。
-        """
         if not self.rows:
             messagebox.showwarning("警告", "まず CSV ファイルを読み込んでください。")
             return
-        
-        if self.row_text.tag_ranges("hit"):
-            self.row_text.config(state=tk.NORMAL)
-            self.row_text.tag_remove("hit", "1.0", tk.END)
-            self.row_text.tag_remove("sel_line", "1.0", tk.END)
-            self.row_text.config(state=tk.DISABLED)
-            self.status.set("ハイライトを解除しました")
-            return
 
-        pat = re.compile(r",[0-9]{10},")
-        hits = 0
-        first_disp_idx: int | None = None
-
-        # 旧ハイライト除去
-        self.row_text.config(state=tk.NORMAL)
-        self.row_text.tag_remove("hit", "1.0", tk.END)
-        self.row_text.tag_remove("sel_line", "1.0", tk.END)
-        self.row_text.config(state=tk.DISABLED)
-
-        # 検索してタグ付け
-        self.row_text.config(state=tk.NORMAL)
-        for disp_idx, row_idx in enumerate(self.display_indices):
-            row_string = "|".join(self.rows[row_idx])
-            for m in pat.finditer(row_string):
-                line_num = int(float(self.line_starts[disp_idx]))    # 1-indexed
-                start_idx = f"{line_num}.{m.start()}"
-                end_idx   = f"{line_num}.{m.end()}"
-                self.row_text.tag_add("hit", start_idx, end_idx)
-                hits += 1
-            if first_disp_idx is None and pat.search(row_string):
-                first_disp_idx = disp_idx   # スクロール用
-        self.row_text.config(state=tk.DISABLED)
-
-        if first_disp_idx is not None:
-            self.row_lb.selection_clear(0, tk.END)
-            self.row_lb.selection_set(first_disp_idx)
+        # 現在の桁数で正規表現を生成して保存
+        self.highlight_pat = re.compile(
+            rf",([0-9]{{{self.patient_code_len}}}){','*self.trailing_commas}"
+        )
+        hits = self._apply_highlight_to_current_view()
 
         if hits:
             self.status.set(f"{hits} 件ハイライトしました")
         else:
             messagebox.showinfo("検索結果", "該当する患者コードは見つかりませんでした。")
             self.status.set("ヒットなし")
+
+    # ---------- ハイライト解除 ----------
+    def clear_highlight(self):
+        self.highlight_pat = None
+        self.row_text.config(state=tk.NORMAL)
+        self.row_text.tag_remove("hit", "1.0", tk.END)
+        self.row_text.config(state=tk.DISABLED)
+        self.status.set("ハイライトを解除しました")
+
+    # ---------- ハイライト共通関数 ----------
+    def _apply_highlight_to_current_view(self) -> int:
+        """
+        現在の表示行 (display_indices) に self.highlight_pat があればタグ付け。
+        戻り値: 付与した件数
+        """
+        
+        self.row_text.config(state=tk.NORMAL)
+        # 旧タグを一旦クリア
+        self.row_text.tag_remove("hit", "1.0", tk.END)
+
+        if self.highlight_pat is None:
+            self.row_text.config(state=tk.DISABLED)
+            return 0
+
+        hits = 0
+        for disp_idx, row_idx in enumerate(self.display_indices):
+            row_string = "|".join(self.rows[row_idx])
+            for m in self.highlight_pat.finditer(row_string):
+                line_num = int(float(self.line_starts[disp_idx]))  # 1-indexed
+                start_idx = f"{line_num}.{m.start()}"
+                end_idx   = f"{line_num}.{m.end()}"
+                self.row_text.tag_add("hit", start_idx, end_idx)
+                hits += 1
+        self.row_text.config(state=tk.DISABLED)
+        return hits
+
+    # ---------- 変換ユーティリティ ----------
+    def _normalize_code(self, code: str) -> str:
+        """
+        self.patient_code_conv_len で指定された桁数に変換
+          - 短くする: 左（先頭）から切り落とす
+          - 長くする: 左側に 0 を追加
+        """
+        L = self.patient_code_conv_len
+        if len(code) > L:          # 長い → 左からカット
+            return code[-L:]
+        else:                      # 短い／同じ → 0 埋め
+            return code.zfill(L)
+
+    def convert_and_save(self):
+        if not self.rows:
+            messagebox.showwarning("警告", "まず CSV ファイルを読み込んでください。")
+            return
+        if self.highlight_pat is None:
+            messagebox.showinfo("情報", "ハイライトされた患者コードがありません。")
+            return
+
+        pat = self.highlight_pat               # ,(\d{N}),,, の形
+        tc  = "," * self.trailing_commas       # 後方カンマ
+
+        # ---- 行全体を文字列に戻して一括置換 ----
+        out_lines: list[str] = []
+        for row in self.rows:
+            line = ",".join(row)               # 1 行をそのままカンマ連結
+            fixed = pat.sub(
+                lambda m: f",{self._normalize_code(m.group(1))}{tc}",
+                line
+            )
+            out_lines.append(fixed)
+
+        # ---- ファイル名：8.3 形式 + .UKE ----
+        base = self.file_path
+        assert base is not None
+        stem = re.sub(r'[^A-Za-z0-9]', '', base.stem) or "F"
+        stem = (stem[:1] + datetime.datetime.now().strftime("%y%m%d%H"))[:8]
+        out_path = base.with_name(stem.upper() + ".UKE")
+
+        # ---- Shift‑JIS・CRLF・各行を二重引用 ----
+        with out_path.open("w", encoding="cp932", newline="") as f:
+            for line in out_lines:
+                f.write(f"{line}\r\n")   
+
+        messagebox.showinfo("完了", f"変換後ファイルを保存しました:\n{out_path}")
+        self.status.set(f"保存完了: {out_path.name}")
 
     # ---------- ファイルリネーム ----------
     def rename_files(self):
@@ -257,6 +301,44 @@ class UKEEditorGUI(tk.Tk):
         msg = "\n\n".join(summary) if summary else "対象ファイルがありませんでした。"
         messagebox.showinfo("リネーム結果", msg)
 
+    # ---------- 設定ダイアログ ----------
+    def open_settings(self):
+        """患者コード関連の設定をまとめて入力"""
+        dialog = tk.Toplevel(self)
+        dialog.title("設定")
+        dialog.resizable(False, False)
+        tk.Label(dialog, text="患者コード桁数（ハイライト用）").grid(row=0, column=0, sticky="w", padx=4, pady=4)
+        tk.Label(dialog, text="患者コード変換桁数").grid(        row=1, column=0, sticky="w", padx=4, pady=4)
+        tk.Label(dialog, text="後方カンマ数").grid(row=2, column=0, sticky="w", padx=4, pady=4)
+
+        len_var  = tk.IntVar(value=self.patient_code_len)
+        conv_var = tk.IntVar(value=self.patient_code_conv_len)
+        comma_var = tk.IntVar(value=self.trailing_commas)
+
+        tk.Spinbox(dialog, from_=1, to=20, textvariable=len_var,  width=5).grid(row=0, column=1, padx=4)
+        tk.Spinbox(dialog, from_=1, to=20, textvariable=conv_var, width=5).grid(row=1, column=1, padx=4)
+        tk.Spinbox(dialog, from_=1, to=5, textvariable=comma_var, width=5).grid(row=2, column=1, padx=4)
+
+        def on_ok():
+            self.patient_code_len      = len_var.get()
+            self.patient_code_conv_len = conv_var.get()
+            self.trailing_commas       = comma_var.get()
+
+            self.status.set(
+                f"設定変更: ハイライト桁数={self.patient_code_len} / "
+                f"変換桁数={self.patient_code_conv_len} / "
+                f"後方カンマ数={self.trailing_commas}"
+            )
+            # ハイライト正規表現を作り直す
+            if self.highlight_pat is not None:
+                self.highlight_pat = re.compile(
+                    rf",([0-9]{{{self.patient_code_len}}}){','*self.trailing_commas}"
+                )
+                self._apply_highlight_to_current_view()
+            dialog.destroy()
+
+        tk.Button(dialog, text="OK", width=8, command=on_ok).grid(row=3, column=0, columnspan=2, pady=6)
+        dialog.grab_set()   # モーダル化
 
 if __name__ == "__main__":
     app = UKEEditorGUI()

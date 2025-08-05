@@ -45,7 +45,6 @@ def _detect_encoding(path: Path, sample_bytes: int = 4096) -> str:
 
     return best_enc
 
-
 def _detect_dialect(path: Path, encoding: str) -> csv.Dialect:
     """
     区切り文字を推定。失敗したら
@@ -74,7 +73,6 @@ def _detect_dialect(path: Path, encoding: str) -> csv.Dialect:
         quoting = csv.QUOTE_MINIMAL
     return _SingleCol
 
-
 def load_csv(path: Path, has_header: bool = True) -> Tuple[List[str], List[List[str]]]:
     """
     CSV 全体を読み込み、ヘッダ(List[str]) と 行データ(List[List[str]]) を返す。
@@ -95,15 +93,6 @@ def load_csv(path: Path, has_header: bool = True) -> Tuple[List[str], List[List[
     else:
         header, body = [], rows
     return header, body
-
-def replace_cell(rows: List[List[str]], row_i: int, col_i: int,
-                 new_val: str) -> None:
-    if row_i >= len(rows):
-        raise IndexError(f"行 {row_i} は範囲外")
-    if col_i >= len(rows[row_i]):
-        raise IndexError(f"列 {col_i} は範囲外")
-    rows[row_i][col_i] = new_val
-
 
 def save_csv(base_path: Path, rows: List[List[str]]) -> Path:
     ts = datetime.now().strftime('%Y%m%d%H%M%S')
