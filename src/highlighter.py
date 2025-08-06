@@ -68,6 +68,16 @@ class Highlighter:
 
         for disp_idx, row_idx in enumerate(display_indices):
             row_string = "|".join(rows[row_idx])
+            print(rows[0][0])
+            if not rows[row_idx]:
+                continue
+
+            cell0 = rows[row_idx][0].strip().strip('"')
+            # 行全体が 1 セルの場合は先頭カンマまでを取り出す
+            rec_type = cell0.split(",", 1)[0]
+            if rec_type != "RE":
+                continue
+            row_string = "|".join(rows[row_idx])
             for m in self.regex.finditer(row_string):
                 line = int(float(line_starts[disp_idx]))        # 1-indexed
 

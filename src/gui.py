@@ -133,24 +133,43 @@ class UKEEditorGUI(tk.Tk):
                 self.row_lb.insert(tk.END, code); seen.add(code)
 
     def _build_text(self):
-        self.row_text.config(state="normal"); self.row_text.delete("1.0", "end")
+        self.row_text.config(state="normal")
+        self.row_text.delete("1.0", "end")
         self.line_starts = []
+
         for idx in self.display_indices:
             self.line_starts.append(self.row_text.index(tk.INSERT))
             self.row_text.insert(tk.END, "|".join(self.rows[idx]) + "\n")
+
         self.row_text.config(state="disabled")
-        self._apply_highlight()
+
+        # ★ここで表示行数を更新し、ハイライト再描画後に status 表示へ使う
+        # 表示行数を保存 → ハイライト再描画
+        self.visible_count = len(self.display_indices)
+        self._apply_highlight()            # ←従来どおり
+
+        # ★ここでステータスバーを更新
+        self._update_status_counts()
+
+    def _update_status_counts(self):
+        """表示行数と現在のハイライト件数をステータスバーへ反映"""
+        hit_cnt = len(self.hl.matches) if self.hl.regex else 0
+        self.status.set(f"表示 {self.visible_count} 行　/　ハイライト {hit_cnt} 件")
 
     # --- Listbox フィルタ ---
     def filter_by_code(self, _evt):
         sel = self.row_lb.curselection()
-        self.display_indices = (list(range(len(self.rows)))
-                                if not sel else
-                                [i for i, r in enumerate(self.rows)
-                                 if r[DISPLAY_COL].startswith(self.row_lb.get(sel[0]))])
+        self.display_indices = (
+            list(range(len(self.rows))) if not sel else
+            [i for i, r in enumerate(self.rows)
+            if r[DISPLAY_COL].startswith(self.row_lb.get(sel[0]))]
+        )
         self._build_text()
-        msg = "すべて表示" if not sel else f"フィルター: {self.row_lb.get(sel[0])}"
-        self.status.set(msg)
+
+        if sel:
+            # 追加でフィルター条件だけ尾⾔に付けたい場合
+            self.status.set(self.status.get() + f"　← フィルター: {self.row_lb.get(sel[0])}")
+
     # ────────────────────────── ハイライト操作 ──────────────────────────
     def _setup_highlighter(self):
         """regex と枝番モードを Highlighter へ反映"""
@@ -168,7 +187,7 @@ class UKEEditorGUI(tk.Tk):
         self._setup_highlighter()
         self.hl.scan(self.rows, self.display_indices, self.line_starts)
         self.hl.draw_all()
-        self.status.set(f"{len(self.hl.matches)} 件ハイライトしました")
+        self.status.set(f"表示 {self.visible_count} 行　/　ハイライト {len(self.hl.matches)} 件")
 
     def highlight_first_match(self):
         if not self.rows: return
@@ -177,13 +196,19 @@ class UKEEditorGUI(tk.Tk):
         if not self.hl.matches:
             messagebox.showinfo("検索結果", "該当する患者コードは見つかりませんでした。"); return
         self.hl.draw_single(0)
-        self.status.set("先頭をハイライトしました")
+        self.status.set(
+            f"表示 {self.visible_count} 行　/　ハイライト {len(self.hl.matches)} 件"
+            f"　(1 / {len(self.hl.matches)})"
+        )
 
     def highlight_next_match(self):
         if not self.hl.matches:
             self.highlight_first_match(); return
         self.hl.draw_single(self.hl.focus_idx + 1)
-        self.status.set("ハイライト移動")
+        self.status.set(
+            f"表示 {self.visible_count} 行　/　ハイライト {len(self.hl.matches)} 件"
+            f"　({self.hl.focus_idx+1} / {len(self.hl.matches)})"
+        )
 
     def _apply_highlight(self):
         """スクロールやフィルター更新時に再描画"""
@@ -194,6 +219,8 @@ class UKEEditorGUI(tk.Tk):
             self.hl.draw_single(self.hl.focus_idx)
         else:
             self.hl.draw_all()
+        
+        self._update_status_counts()
 
     def clear_highlight(self):
         self.hl.regex = None; self.hl.matches.clear(); self.hl.focus_idx = -1
@@ -202,7 +229,7 @@ class UKEEditorGUI(tk.Tk):
         self.row_text.tag_remove("single", "1.0", "end")
         self.row_text.tag_remove("branch", "1.0", "end")
         self.row_text.config(state="disabled")
-        self.status.set("ハイライトを解除しました")
+        self.status.set(f"表示 {self.visible_count} 行　/　ハイライト 0 件")
 
     # --- 枝番モード変更時に即時再描画 ---
     def _refresh_branch_mode(self):
@@ -371,10 +398,6 @@ class UKEEditorGUI(tk.Tk):
         tk.Button(dialog, text="OK", width=8, command=on_ok).grid(row=3, column=0, columnspan=2, pady=6)
         dialog.grab_set()   # モーダル化
 
-    # ---------- ダミー用メソッド ----------
-    def _info(self, name: str):
-        self.status.set(f"{name}：{datetime.datetime.now().strftime('%H:%M:%S')}")
-        messagebox.showinfo("Dummy", f"{name} ボタンが押されました")
 
 
 if __name__ == "__main__":
