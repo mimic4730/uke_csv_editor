@@ -15,7 +15,7 @@ class UKEEditorGUI(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("UKE CSV Editor")
-        self.geometry("780x520")
+        self.geometry("900x540")
         self.resizable(False, False)
 
         # データ保持
@@ -23,27 +23,43 @@ class UKEEditorGUI(tk.Tk):
         self.rows: List[List[str]] = []
         self.display_indices: List[int] = []  # フィルター適用後の行インデックス
 
-        # === 上部ボタン ===
-        btn_frame = tk.Frame(self)
-        btn_frame.pack(pady=6)
-        tk.Button(btn_frame, text="リネーム", width=10,
-            command=self.rename_files).grid(row=0, column=0, padx=6)
-        tk.Button(btn_frame, text="ファイル読み込み", width=14,
-            command=self.load_file).grid(row=0, column=1, padx=6)
-        tk.Button(btn_frame, text="患者コード検索", width=14,
-            command=self.search_patient_code).grid(row=0, column=2, padx=6)
-        tk.Button(btn_frame, text="全行表示", width=10,
-            command=lambda: (self.row_lb.selection_clear(0, tk.END),
-            self.filter_by_code(None))).grid(row=0, column=3, padx=6)
-        tk.Button(btn_frame, text="ハイライト解除", width=12,
-            command=self.clear_highlight).grid(row=0, column=4, padx=6)
-        
-        tk.Button(btn_frame, text="設定", width=10,
-            command=self.open_settings).grid(row=1, column=0, padx=6)
-        tk.Button(
-            btn_frame, text="コード変換して保存", width=14,
-            command=self.convert_and_save
-        ).grid(row=1, column=1, columnspan=1, padx=6)
+        # ----------------------------  UI  ----------------------------
+        btn_frame1 = tk.Frame(self)
+        btn_frame1.pack(pady=4)
+
+        # 1 段目（ファイル操作系）
+        btn_frame1 = tk.Frame(self)
+        btn_frame1.pack(pady=4, anchor="w")
+
+        tk.Button(btn_frame1, text="読み込みファイルをリネーム",         width=20,
+                command=self.rename_files).grid(row=0, column=0, padx=4, sticky="w")
+
+        tk.Button(btn_frame1, text="ファイル読み込み", width=18,
+                command=self.load_file).grid(row=0, column=1, padx=4, sticky="w")
+
+        tk.Button(btn_frame1, text="全行表示",         width=18,
+                command=lambda: (self.row_lb.selection_clear(0, tk.END),self.filter_by_code(None))
+        ).grid(row=0, column=2, padx=4, sticky="w")
+
+        tk.Button(btn_frame1, text="設定",             width=18,
+                command=self.open_settings).grid(row=0, column=3, padx=4, sticky="w")
+
+
+        # 2 段目（ハイライト系）
+        btn_frame2 = tk.Frame(self)
+        btn_frame2.pack(pady=2, anchor="w")
+
+        tk.Button(btn_frame2, text="患者コード・全行ハイライト", width=20,
+                command=self.highlight_all_matches).grid(row=0, column=0, padx=4, sticky="w")
+
+        tk.Button(btn_frame2, text="先頭 1 件ハイライト", width=18,
+                command=self.highlight_first_match).grid(row=0, column=1, padx=4, sticky="w")
+
+        tk.Button(btn_frame2, text="次の行へ", width=18,
+                command=self.highlight_next_match).grid(row=0, column=2, padx=4, sticky="w")
+
+        tk.Button(btn_frame2, text="ハイライト解除", width=18,
+                command=self.clear_highlight).grid(row=0, column=3, padx=4, sticky="w")
 
         # === リスト表示 ===
         list_frame = tk.Frame(self)
@@ -53,28 +69,31 @@ class UKEEditorGUI(tk.Tk):
         tk.Label(list_frame, text="コード").pack(side=tk.LEFT, anchor=tk.NW)
         self.row_lb.bind("<<ListboxSelect>>", self.filter_by_code)
 
-        # Text へ置換（行単位の開始オフセットを保存）
         self.row_text = tk.Text(list_frame, wrap="none", width=120, height=25)
         self.row_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.row_text.tag_configure("hit",background="#ffff66",foreground="#000000")
-        self.row_text.tag_configure("sel_line", background="#ddeeff")
+        self.row_text.tag_configure("hit",    background="#ffff66", foreground="#000000")  # 全体ハイライト
+        self.row_text.tag_configure("single", background="#a0ffa0", foreground="#000000")  # 単一ハイライト
         self.row_text.config(state=tk.DISABLED)
         tk.Label(list_frame, text="内容").pack(side=tk.LEFT, anchor=tk.NW)
 
         # 行頭インデックス（"1.0", "2.0", …）を保持
         self.line_starts: list[str] = []
 
-        # 患者コード桁数（デフォルト 10）
-        self.patient_code_len: int = 10
-        
-        # 変換用桁数
+        # ハイライト関連状態
+        self.patient_code_len: int  = 10
         self.patient_code_conv_len: int = 10
-
-        # 後方カンマ設定（デフォルト　２）
-        self.trailing_commas: int = 2 
-
-        # 現在有効なハイライト正規表現
+        self.trailing_commas: int   = 2
         self.highlight_pat: re.Pattern | None = None
+        self.match_spans: list[tuple[str, str]] = []  # Text index の (start,end)
+        self.cur_match_idx: int = -1  # -1 = 未選択
+
+        bottom_frame = tk.Frame(self)
+        bottom_frame.pack(side=tk.BOTTOM, pady=8)
+
+        tk.Button(
+            bottom_frame, text="コード変換して保存",
+            width=18, command=self.convert_and_save
+        ).pack()
 
         # === ステータスバー ===
         self.status = tk.StringVar(value="ファイル未選択")
@@ -163,58 +182,110 @@ class UKEEditorGUI(tk.Tk):
         self.row_text.config(state=tk.DISABLED)
         self._apply_highlight_to_current_view()
 
-    # ---------- 患者コード検索（全マッチをハイライト） ----------
-    def search_patient_code(self):
-        if not self.rows:
-            messagebox.showwarning("警告", "まず CSV ファイルを読み込んでください。")
+    # ----------------------------  ハイライト関連 ----------------------------
+    def _build_regex(self):
+        return re.compile(rf",([0-9]{{{self.patient_code_len}}}){','*self.trailing_commas}")
+
+    def _collect_matches(self):
+        """現在の表示行に対して self.match_spans を更新"""
+        self.match_spans.clear()
+        pat = self.highlight_pat
+        if pat is None:
             return
-
-        # 現在の桁数で正規表現を生成して保存
-        self.highlight_pat = re.compile(
-            rf",([0-9]{{{self.patient_code_len}}}){','*self.trailing_commas}"
-        )
-        hits = self._apply_highlight_to_current_view()
-
-        if hits:
-            self.status.set(f"{hits} 件ハイライトしました")
-        else:
-            messagebox.showinfo("検索結果", "該当する患者コードは見つかりませんでした。")
-            self.status.set("ヒットなし")
-
-    # ---------- ハイライト解除 ----------
-    def clear_highlight(self):
-        self.highlight_pat = None
-        self.row_text.config(state=tk.NORMAL)
-        self.row_text.tag_remove("hit", "1.0", tk.END)
-        self.row_text.config(state=tk.DISABLED)
-        self.status.set("ハイライトを解除しました")
-
-    # ---------- ハイライト共通関数 ----------
-    def _apply_highlight_to_current_view(self) -> int:
-        """
-        現在の表示行 (display_indices) に self.highlight_pat があればタグ付け。
-        戻り値: 付与した件数
-        """
-        
-        self.row_text.config(state=tk.NORMAL)
-        # 旧タグを一旦クリア
-        self.row_text.tag_remove("hit", "1.0", tk.END)
-
-        if self.highlight_pat is None:
-            self.row_text.config(state=tk.DISABLED)
-            return 0
-
-        hits = 0
         for disp_idx, row_idx in enumerate(self.display_indices):
             row_string = "|".join(self.rows[row_idx])
-            for m in self.highlight_pat.finditer(row_string):
+            for m in pat.finditer(row_string):
                 line_num = int(float(self.line_starts[disp_idx]))  # 1-indexed
                 start_idx = f"{line_num}.{m.start()}"
                 end_idx   = f"{line_num}.{m.end()}"
-                self.row_text.tag_add("hit", start_idx, end_idx)
-                hits += 1
+                self.match_spans.append((start_idx, end_idx))
+
+    def highlight_all_matches(self):
+        """既存の search_patient_code と同義。"""
+        if not self.rows:
+            messagebox.showwarning("警告", "まず CSV ファイルを読み込んでください。")
+            return
+        self.highlight_pat = self._build_regex()
+        self._collect_matches()
+        self.row_text.config(state=tk.NORMAL)
+        self.row_text.tag_remove("hit", "1.0", tk.END)
+        self.row_text.tag_remove("single", "1.0", tk.END)
+        for s, e in self.match_spans:
+            self.row_text.tag_add("hit", s, e)
         self.row_text.config(state=tk.DISABLED)
-        return hits
+        self.cur_match_idx = -1
+        self.status.set(f"{len(self.match_spans)} 件ハイライトしました")
+
+    def highlight_first_match(self):
+        """マッチの 1 件目だけをハイライト"""
+        if not self.rows:
+            messagebox.showwarning("警告", "まず CSV ファイルを読み込んでください。")
+            return
+        self.highlight_pat = self._build_regex()
+        self._collect_matches()
+        if not self.match_spans:
+            messagebox.showinfo("検索結果", "該当する患者コードは見つかりませんでした。")
+            return
+        self.cur_match_idx = 0
+        self._render_single_highlight()
+        self.status.set("先頭をハイライトしました (1 / %d)" % len(self.match_spans))
+
+    def highlight_next_match(self):
+        if not self.match_spans:
+            self.highlight_first_match()
+            return
+        self.cur_match_idx = (self.cur_match_idx + 1) % len(self.match_spans)
+        self._render_single_highlight()
+        self.status.set("ハイライトを移動 (%d / %d)" % (self.cur_match_idx+1, len(self.match_spans)))
+
+    def _render_single_highlight(self):
+        """self.cur_match_idx を single タグで表示"""
+        self.row_text.config(state=tk.NORMAL)
+        self.row_text.tag_remove("hit", "1.0", tk.END)
+        self.row_text.tag_remove("single", "1.0", tk.END)
+        if 0 <= self.cur_match_idx < len(self.match_spans):
+            s, e = self.match_spans[self.cur_match_idx]
+            self.row_text.tag_add("single", s, e)
+            self.row_text.see(s)  
+        self.row_text.config(state=tk.DISABLED)
+
+    def _apply_highlight_to_current_view(self) -> None:
+        """
+        表示内容を基にハイライトを再描画する  
+        ・self.highlight_pat が無い → 何もしない  
+        ・self.cur_match_idx >=0    → 単一ハイライト（緑）  
+        ・上記以外                → 全体ハイライト（黄）
+        """
+        if self.highlight_pat is None:
+            return  # 解除済み
+
+        # 再スキャン（フィルタ変更／設定変更時に必要）
+        self._collect_matches()
+
+        self.row_text.config(state=tk.NORMAL)
+        self.row_text.tag_remove("hit",    "1.0", tk.END)
+        self.row_text.tag_remove("single", "1.0", tk.END)
+
+        if 0 <= self.cur_match_idx < len(self.match_spans):
+            # 1 行だけハイライト
+            s, e = self.match_spans[self.cur_match_idx]
+            self.row_text.tag_add("single", s, e)
+        else:
+            # 全行ハイライト
+            for s, e in self.match_spans:
+                self.row_text.tag_add("hit", s, e)
+
+        self.row_text.config(state=tk.DISABLED)
+
+    def clear_highlight(self):
+        self.highlight_pat = None
+        self.match_spans.clear()
+        self.cur_match_idx = -1
+        self.row_text.config(state=tk.NORMAL)
+        self.row_text.tag_remove("hit", "1.0", tk.END)
+        self.row_text.tag_remove("single", "1.0", tk.END)
+        self.row_text.config(state=tk.DISABLED)
+        self.status.set("ハイライトを解除しました")
 
     # ---------- 変換ユーティリティ ----------
     def _normalize_code(self, code: str) -> str:
