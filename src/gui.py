@@ -11,7 +11,6 @@ from editor import load_csv
 
 DISPLAY_COL = 0   # フィルタ用列（先頭列）
 
-
 class UKEEditorGUI(tk.Tk):
     # ────────────────────────── 初期化 ──────────────────────────
     def __init__(self) -> None:
@@ -36,11 +35,14 @@ class UKEEditorGUI(tk.Tk):
         self.trailing_commas = 2
 
         # Highlighter インスタンス
+        self.detect_mode = tk.IntVar(value=0)   # 0=後方カンマ, 1=任意記号
+        self.custom_sym  = tk.StringVar(value=",")
         self.hl = highlighter.Highlighter(self.row_text)
         self.highlight_pat = None 
 
     # ────────────────────────── UI 構築 ──────────────────────────
     def _build_toolbar(self):
+        self.br_mode = tk.IntVar(value=0)
         # 1段目
         f1 = tk.Frame(self); f1.pack(pady=4, anchor="w")
         tk.Button(f1, text="読み込みファイルをリネーム", width=20,
@@ -63,22 +65,6 @@ class UKEEditorGUI(tk.Tk):
                   command=self.highlight_next_match).grid(row=0, column=2, padx=4, sticky="w")
         tk.Button(f2, text="ハイライト解除", width=18,
                   command=self.clear_highlight).grid(row=0, column=3, padx=4, sticky="w")
-
-        # 3段目（枝番）
-        f3 = tk.Frame(self); f3.pack(pady=2, anchor="w")
-        tk.Button(f3, text="枝番登録", width=10,
-                  command=self.register_branches).grid(row=0, column=0, padx=4)
-        tk.Button(f3, text="枝番確認", width=10,
-                  command=self.show_branches).grid(row=0, column=1, padx=4)
-
-        self.br_mode = tk.IntVar(value=0)
-        tk.Label(f3, text="枝番処理").grid(row=0, column=2, padx=(16, 4))
-        tk.Radiobutton(f3, text="オフ",  value=0, variable=self.br_mode,
-                       command=self._refresh_branch_mode).grid(row=0, column=3, sticky="w")
-        tk.Radiobutton(f3, text="1 桁", value=1, variable=self.br_mode,
-                       command=self._refresh_branch_mode).grid(row=0, column=4, sticky="w")
-        tk.Radiobutton(f3, text="2 桁", value=2, variable=self.br_mode,
-                       command=self._refresh_branch_mode).grid(row=0, column=5, sticky="w")
 
     def _build_text_area(self):
         list_frame = tk.Frame(self); list_frame.pack(pady=4, fill=tk.BOTH, expand=True)
@@ -166,19 +152,22 @@ class UKEEditorGUI(tk.Tk):
         )
         self._build_text()
 
-        if sel:
-            # 追加でフィルター条件だけ尾⾔に付けたい場合
-            self.status.set(self.status.get() + f"　← フィルター: {self.row_lb.get(sel[0])}")
-
     # ────────────────────────── ハイライト操作 ──────────────────────────
     def _setup_highlighter(self):
         """regex と枝番モードを Highlighter へ反映"""
-        self.hl.set_regex(self.patient_code_len, self.trailing_commas)
-        self.highlight_pat = self.hl.regex 
+        pattern = self.hl._build_regex(
+            n_digits=self.patient_code_len,
+            trailing_commas=self.trailing_commas,
+            detect_mode=self.detect_mode.get(),
+            custom_sym=self.custom_sym.get()
+        )
+        self.hl.set_regex(pattern)      # ← これだけで OK
+        self.highlight_pat = pattern    # 変換用にも保持
+
+        # ❷ 枝番モード
         self.hl.set_branch_mode(
             self.br_mode.get(),
-            bm.list_suffixes(1),
-            bm.list_suffixes(2)
+            bm.list_suffixes(1), bm.list_suffixes(2)
         )
 
     def highlight_all_matches(self):
@@ -364,39 +353,83 @@ class UKEEditorGUI(tk.Tk):
         messagebox.showinfo("リネーム結果", msg)
 
     # ---------- 設定ダイアログ ----------
+    def _apply_settings(self, len_v, conv_v, comma_v, dlg):
+        self.patient_code_len      = len_v.get()
+        self.patient_code_conv_len = conv_v.get()
+        self.trailing_commas       = comma_v.get()
+
+        self.status.set(f"設定変更: "
+                        f"ハイライト桁数={self.patient_code_len} / "
+                        f"変換桁数={self.patient_code_conv_len} / "
+                        f"後方カンマ数={self.trailing_commas} / "
+                        f"枝番モード={self.br_mode.get()}")
+        self._apply_highlight()   # 再描画
+        dlg.destroy()
+    
     def open_settings(self):
-        """患者コード関連の設定をまとめて入力"""
         dialog = tk.Toplevel(self)
         dialog.title("設定")
+        dialog.geometry("+{}+{}".format(
+            self.winfo_rootx() + 100,   # メイン窓から少し右
+            self.winfo_rooty() + 80))   # 少し下に配置
+        dialog.minsize(600, 1)          # 最小幅 480px に固定
         dialog.resizable(False, False)
+
+        # ── 患者コード設定 ──────────────────
         tk.Label(dialog, text="患者コード桁数（ハイライト用）").grid(row=0, column=0, sticky="w", padx=4, pady=4)
         tk.Label(dialog, text="患者コード変換桁数").grid(        row=1, column=0, sticky="w", padx=4, pady=4)
-        tk.Label(dialog, text="後方カンマ数").grid(row=2, column=0, sticky="w", padx=4, pady=4)
+        tk.Label(dialog, text="後方カンマ数").grid(            row=2, column=0, sticky="w", padx=4, pady=4)
 
         len_var  = tk.IntVar(value=self.patient_code_len)
         conv_var = tk.IntVar(value=self.patient_code_conv_len)
-        comma_var = tk.IntVar(value=self.trailing_commas)
+        comma_var= tk.IntVar(value=self.trailing_commas)
 
         tk.Spinbox(dialog, from_=1, to=20, textvariable=len_var,  width=5).grid(row=0, column=1, padx=4)
         tk.Spinbox(dialog, from_=1, to=20, textvariable=conv_var, width=5).grid(row=1, column=1, padx=4)
-        tk.Spinbox(dialog, from_=1, to=5, textvariable=comma_var, width=5).grid(row=2, column=1, padx=4)
+        tk.Spinbox(dialog, from_=1, to=5,  textvariable=comma_var,width=5).grid(row=2, column=1, padx=4)
 
-        def on_ok():
-            self.patient_code_len      = len_var.get()
-            self.patient_code_conv_len = conv_var.get()
-            self.trailing_commas       = comma_var.get()
+        # ── ★ 枝番関連 UI をここに内包 ★ ─────────
+        sep = tk.Frame(dialog, height=2, bd=1, relief="sunken")
+        sep.grid(row=3, column=0, columnspan=3, pady=6, sticky="ew")
 
-            self.status.set(
-                f"設定変更: ハイライト桁数={self.patient_code_len} / "
-                f"変換桁数={self.patient_code_conv_len} / "
-                f"後方カンマ数={self.trailing_commas}"
-            )
-            # Highlighter に新しい設定を知らせて再描画
-            self._apply_highlight()
-            dialog.destroy()
+        # 枝番登録 / 確認ボタン
+        br_btn_frame = tk.Frame(dialog); br_btn_frame.grid(row=4, column=0, columnspan=3, pady=2)
+        tk.Button(br_btn_frame, text="枝番登録", width=10,
+                command=self.register_branches).pack(side="left", padx=4)
+        tk.Button(br_btn_frame, text="枝番確認", width=10,
+                command=self.show_branches).pack(side="left", padx=4)
 
-        tk.Button(dialog, text="OK", width=8, command=on_ok).grid(row=3, column=0, columnspan=2, pady=6)
-        dialog.grab_set()   # モーダル化
+        # 枝番処理ラジオ (オフ / 1桁 / 2桁)
+        tk.Label(dialog, text="枝番処理").grid(row=5, column=0, sticky="w", padx=(4,0))
+        tk.Radiobutton(dialog, text="オフ",  value=0, variable=self.br_mode,
+                    command=self._refresh_branch_mode).grid(row=5, column=1, sticky="w")
+        tk.Radiobutton(dialog, text="1 桁", value=1, variable=self.br_mode,
+                    command=self._refresh_branch_mode).grid(row=5, column=2, sticky="w")
+        tk.Radiobutton(dialog, text="2 桁", value=2, variable=self.br_mode,
+                    command=self._refresh_branch_mode).grid(row=5, column=3, sticky="w")
+        
+        # ── 患者コード判定ロジック ──────────────────────────
+        row_base = 6  # すでに3行使っているので 3 から
+        tk.Label(dialog, text="判定ロジック").grid(row=row_base, column=0,
+                                                sticky="w", padx=4, pady=(12,4))
+
+        # ラジオボタン
+        entry_sym = tk.Entry(dialog, textvariable=self.custom_sym, width=4)
+        entry_sym.grid(row=row_base, column=3, sticky="w", padx=(4,0))
+
+        tk.Radiobutton(dialog, text="後方カンマ数", value=0, variable=self.detect_mode,
+                    command=lambda e=entry_sym: e.config(state="disabled")
+                    ).grid(row=row_base, column=1, sticky="w")
+        tk.Radiobutton(dialog, text="任意の記号", value=1, variable=self.detect_mode,
+                    command=lambda e=entry_sym: e.config(state="normal")
+                    ).grid(row=row_base, column=2, sticky="w")
+
+        # ── OK ボタン ────────────────────────
+        tk.Button(dialog, text="OK", width=8,
+                command=lambda: self._apply_settings(len_var, conv_var, comma_var, dialog)
+                ).grid(row=7, column=0, columnspan=4, pady=8)
+
+        dialog.grab_set()
 
 
 

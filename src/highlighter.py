@@ -2,20 +2,13 @@
 """患者コードのハイライト専用モジュール"""
 
 from __future__ import annotations
+
+import tkinter as tk 
 import re
 from typing import List, Tuple
 
 
 class Highlighter:
-    """
-    Text ウィジェットに対して
-
-    * 全件ハイライト（黄）
-    * 1 件だけハイライト（緑）
-    * 枝番一致部分ハイライト（赤）
-
-    を切り替え描画するユーティリティ
-    """
 
     # ---------------- 初期化 ----------------
     def __init__(self, text_widget):
@@ -38,8 +31,8 @@ class Highlighter:
         self.focus_idx: int = -1           # -1 = 全件モード
 
     # ---------------- 設定 ----------------
-    def set_regex(self, patient_len: int, trailing_commas: int):
-        self.regex = re.compile(rf",([0-9]{{{patient_len}}}){','*trailing_commas}")
+    def set_regex(self, pattern: re.Pattern | None):
+            self.regex = pattern
 
     def set_branch_mode(
         self,
@@ -52,13 +45,27 @@ class Highlighter:
         self.br_1d = suffixes_1d
         self.br_2d = suffixes_2d
 
+    def _build_regex(self,n_digits: int,trailing_commas: int,detect_mode: int,custom_sym: str) -> re.Pattern:
+        """
+        detect_mode
+            0 … 後方カンマ           → ちょうど n_digits 桁
+            1 … 任意記号（custom_sym）→ 1〜n_digits 桁
+        """
+        charclass = r"[0-9\-]"           # 患者コードに許可する文字
+
+        if detect_mode == 0:
+            # ------ 後方カンマ：固定長 ------
+            tc = "," * trailing_commas
+            return re.compile(rf",\s*({charclass}{{{n_digits}}})\s*{tc}")
+
+        else:
+            # ------ 任意記号：1〜N 桁 ------
+            rng = f"{{1,{n_digits}}}"    # ← 可変長にするのはここだけ
+            sym = re.escape(custom_sym or "*")
+            return re.compile(rf",\s*({charclass}{rng})\s*{sym}")
+
     # ---------------- スキャン ----------------
-    def scan(
-        self,
-        rows: List[List[str]],
-        display_indices: List[int],
-        line_starts: List[str],
-    ):
+    def scan(self,rows: List[List[str]],display_indices: List[int],line_starts: List[str],):
         """行データを走査して self.matches を更新"""
         self.matches.clear()
         self.branch_spans.clear()
