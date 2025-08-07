@@ -38,6 +38,7 @@ class UKEEditorGUI(tk.Tk):
         self.detect_mode = tk.IntVar(value=0)   # 0=後方カンマ, 1=任意記号
         self.custom_sym  = tk.StringVar(value=",")
         self.hl = highlighter.Highlighter(self.row_text)
+        self.hl.detect_mode_current = self.detect_mode.get()
         self.highlight_pat = None 
 
     # ────────────────────────── UI 構築 ──────────────────────────
@@ -163,6 +164,7 @@ class UKEEditorGUI(tk.Tk):
         )
         self.hl.set_regex(pattern)      # ← これだけで OK
         self.highlight_pat = pattern    # 変換用にも保持
+        self.hl.detect_mode_current = self.detect_mode.get()
 
         # ❷ 枝番モード
         self.hl.set_branch_mode(
@@ -217,6 +219,7 @@ class UKEEditorGUI(tk.Tk):
         self.row_text.tag_remove("hit", "1.0", "end")
         self.row_text.tag_remove("single", "1.0", "end")
         self.row_text.tag_remove("branch", "1.0", "end")
+        self.row_text.tag_remove("prefix", "1.0", "end")   
         self.row_text.config(state="disabled")
         self.status.set(f"表示 {self.visible_count} 行　/　ハイライト 0 件")
 
@@ -265,7 +268,14 @@ class UKEEditorGUI(tk.Tk):
     
     def _format_code(self, raw: str) -> str:
         """枝番を除去してから桁固定"""
-        return self._normalize_code(self._strip_branch(raw))
+        if self.detect_mode.get() == 1 and "-" in raw:
+            raw = raw.split("-", 1)[0]          # 例: "12603-0002" → "12603"
+
+        # ★枝番処理（オフならそのまま）
+        raw = self._strip_branch(raw)
+
+        # ★桁数 Fix
+        return self._normalize_code(raw)
     
     def _normalize_code(self, code: str) -> str:
         """

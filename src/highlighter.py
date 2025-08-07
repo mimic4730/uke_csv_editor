@@ -8,8 +8,9 @@ import re
 from typing import List, Tuple
 
 
-class Highlighter:
 
+class Highlighter:
+    
     # ---------------- 初期化 ----------------
     def __init__(self, text_widget):
         self.txt = text_widget
@@ -18,17 +19,20 @@ class Highlighter:
         self.txt.tag_configure("hit",    background="#ffff66", foreground="#000000")
         self.txt.tag_configure("single", background="#a0ffa0", foreground="#000000")
         self.txt.tag_configure("branch", background="#ff6666", foreground="#000000")
+        self.txt.tag_configure("prefix", background="#99ddff", foreground="#000000")
 
         # 状態
         self.regex: re.Pattern | None = None
         self.branch_mode: int = 0          # 0=off / 1=1桁 / 2=2桁
-        self.br_1d: List[str] = []         # 登録済み枝番
-        self.br_2d: List[str] = []
+        self.br_1d: List[str] = []         # 登録済み枝番1桁
+        self.br_2d: List[str] = []         # 登録済み枝番２桁
+        
         # (start, end, tag) -- tag は hit / single
         self.matches: List[Tuple[str, str, str]] = []
         # 枝番だけを塗るための区間
         self.branch_spans: List[Tuple[str, str]] = []
         self.focus_idx: int = -1           # -1 = 全件モード
+        self.prefix_spans: List[Tuple[str, str]] = [] # ハイフンより前
 
     # ---------------- 設定 ----------------
     def set_regex(self, pattern: re.Pattern | None):
@@ -69,13 +73,14 @@ class Highlighter:
         """行データを走査して self.matches を更新"""
         self.matches.clear()
         self.branch_spans.clear()
+        self.prefix_spans.clear()
+        detect_mode = getattr(self, "detect_mode_current", 0)
         
         if self.regex is None:
             return
 
         for disp_idx, row_idx in enumerate(display_indices):
             row_string = "|".join(rows[row_idx])
-            print(rows[0][0])
             if not rows[row_idx]:
                 continue
 
@@ -89,6 +94,12 @@ class Highlighter:
                 line = int(float(line_starts[disp_idx]))        # 1-indexed
 
                 code = m.group(1)
+                if detect_mode == 1 and "-" in code:         # 任意記号モード限定
+                    prefix_len = code.find("-")              # ハイフンまでの長さ
+                    p_start = f"{line}.{m.start(1)}"         # group(1) の先頭
+                    p_end   = f"{line}.{m.start(1)+prefix_len}"
+                    self.prefix_spans.append((p_start, p_end))
+                
                 tag  = "hit"
 
                 # 枝番処理 --------------------------
@@ -114,6 +125,7 @@ class Highlighter:
         self.txt.tag_remove("hit", "1.0", "end")
         self.txt.tag_remove("single", "1.0", "end")
         self.txt.tag_remove("branch", "1.0", "end")
+        self.txt.tag_remove("prefix", "1.0", "end") 
 
     def draw_all(self):
         """全件（黄 or 赤）モードで描画"""
@@ -124,6 +136,8 @@ class Highlighter:
             self.txt.tag_add(tag, s, e)           # hit / single
         for s, e in self.branch_spans:            # 枝番部分を赤で上書き
             self.txt.tag_add("branch", s, e)
+        for s, e in self.prefix_spans:          # ★水色を最後に重ねる
+            self.txt.tag_add("prefix", s, e)
         self.txt.config(state="disabled")
 
     def draw_single(self, idx: int):
@@ -139,5 +153,7 @@ class Highlighter:
         self.txt.tag_add(focus_tag, s, e)         # コード全体 (緑／黄)
         for b_s, b_e in self.branch_spans:        # 赤は常に重ねる
             self.txt.tag_add("branch", b_s, b_e)
+        for s, e in self.prefix_spans:          # ★水色を最後に重ねる
+            self.txt.tag_add("prefix", s, e)
         self.txt.see(s)
         self.txt.config(state="disabled")
