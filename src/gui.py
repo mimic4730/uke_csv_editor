@@ -139,9 +139,15 @@ class UKEEditorGUI(tk.Tk):
         self._update_status_counts()
 
     def _update_status_counts(self):
-        """表示行数と現在のハイライト件数をステータスバーへ反映"""
+        """表示行数と現在のハイライト件数 + RE統計をステータスへ反映"""
         hit_cnt = len(self.hl.matches) if self.hl.regex else 0
-        self.status.set(f"表示 {self.visible_count} 行　/　ハイライト {hit_cnt} 件")
+        re_lines = getattr(self.hl, "re_line_count", 0)
+        re_none  = getattr(self.hl, "no_re_line_count", self.visible_count - re_lines)
+        re_tokens = getattr(self.hl, "re_token_count", 0)
+        self.status.set(
+            f"表示 {self.visible_count} 行　/　ハイライト {hit_cnt} 件　"
+            f"/　REあり {re_lines} 行　/　REなし {re_none} 行　/　RE {re_tokens} 個"
+        )
 
     # --- Listbox フィルタ ---
     def filter_by_code(self, _evt):
@@ -178,7 +184,7 @@ class UKEEditorGUI(tk.Tk):
         self._setup_highlighter()
         self.hl.scan(self.rows, self.display_indices, self.line_starts)
         self.hl.draw_all()
-        self.status.set(f"表示 {self.visible_count} 行　/　ハイライト {len(self.hl.matches)} 件")
+        self._update_status_counts() 
 
     def highlight_first_match(self):
         if not self.rows: return
@@ -187,6 +193,7 @@ class UKEEditorGUI(tk.Tk):
         if not self.hl.matches:
             messagebox.showinfo("検索結果", "該当する患者コードは見つかりませんでした。"); return
         self.hl.draw_single(0)
+        self._update_status_counts() 
         self.status.set(
             f"表示 {self.visible_count} 行　/　ハイライト {len(self.hl.matches)} 件"
             f"　(1 / {len(self.hl.matches)})"
@@ -196,6 +203,7 @@ class UKEEditorGUI(tk.Tk):
         if not self.hl.matches:
             self.highlight_first_match(); return
         self.hl.draw_single(self.hl.focus_idx + 1)
+        self._update_status_counts() 
         self.status.set(
             f"表示 {self.visible_count} 行　/　ハイライト {len(self.hl.matches)} 件"
             f"　({self.hl.focus_idx+1} / {len(self.hl.matches)})"
@@ -297,19 +305,23 @@ class UKEEditorGUI(tk.Tk):
             messagebox.showinfo("情報", "ハイライトされた患者コードがありません。")
             return
 
-        pat = self.hl.regex               # ,(\d{N}),,, の形
-        tc  = "," * self.trailing_commas       # 後方カンマ
+        pat = self.hl.regex
+        tc  = "," * self.trailing_commas
+        RE_FIELD = re.compile(r'(^|,)\s*"?RE"?\s*(,|$)', re.IGNORECASE)
 
-        # ---- 行全体を文字列に戻して一括置換 ----
         out_lines: list[str] = []
         for row in self.rows:
-            line = ",".join(row)               # 1 行をそのままカンマ連結
-            # 変更後
-            fixed = pat.sub(
-                lambda m: f",{self._format_code(m.group(1))}{tc}",
-                line
-            )
-            out_lines.append(fixed)
+            line = ",".join(row)
+            m_re = RE_FIELD.search(line)
+            if not m_re:
+                # RE がない行はそのまま
+                out_lines.append(line)
+                continue
+
+            head = line[:m_re.end()]     # REまで（含む）
+            tail = line[m_re.end():]     # ★RE以降だけ置換
+            tail_fixed = pat.sub(lambda m: f",{self._format_code(m.group(1))}{tc}", tail)
+            out_lines.append(head + tail_fixed)
 
         # ---- ファイル名：8.3 形式 + .UKE ----
         base = self.file_path

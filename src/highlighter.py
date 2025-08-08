@@ -20,6 +20,7 @@ class Highlighter:
         self.txt.tag_configure("single", background="#a0ffa0", foreground="#000000")
         self.txt.tag_configure("branch", background="#ff6666", foreground="#000000")
         self.txt.tag_configure("prefix", background="#99ddff", foreground="#000000")
+        self.txt.tag_configure("re",     background="#ffff66", foreground="#000000")
 
         # 状態
         self.regex: re.Pattern | None = None
@@ -33,6 +34,12 @@ class Highlighter:
         self.branch_spans: List[Tuple[str, str]] = []
         self.focus_idx: int = -1           # -1 = 全件モード
         self.prefix_spans: List[Tuple[str, str]] = [] # ハイフンより前
+        
+        # RE
+        self.re_spans: list[tuple[str, str]] = []
+        self.re_line_count = 0
+        self.no_re_line_count = 0
+        self.re_token_count = 0
 
     # ---------------- 設定 ----------------
     def set_regex(self, pattern: re.Pattern | None):
@@ -69,91 +76,115 @@ class Highlighter:
             return re.compile(rf",\s*({charclass}{rng})\s*{sym}")
 
     # ---------------- スキャン ----------------
-    def scan(self,rows: List[List[str]],display_indices: List[int],line_starts: List[str],):
-        """行データを走査して self.matches を更新"""
+    def scan(self, rows, display_indices, line_starts):
+        """行データを走査して self.matches / self.re_spans を更新"""
         self.matches.clear()
         self.branch_spans.clear()
         self.prefix_spans.clear()
+        self.re_spans.clear()
+        # ★ 統計をリセット
+        self.re_line_count = 0
+        self.no_re_line_count = 0
+        self.re_token_count = 0
+
         detect_mode = getattr(self, "detect_mode_current", 0)
-        
         if self.regex is None:
             return
 
+        RE_FIELD = re.compile(r'(?:(^|,))\s*"?RE"?\s*(?:(,|$))', re.IGNORECASE)
+
         for disp_idx, row_idx in enumerate(display_indices):
-            row_string = "|".join(rows[row_idx])
             if not rows[row_idx]:
                 continue
 
-            cell0 = rows[row_idx][0].strip().strip('"')
-            # 行全体が 1 セルの場合は先頭カンマまでを取り出す
-            rec_type = cell0.split(",", 1)[0]
-            if rec_type != "RE":
+            # ★ 1セル=生UKE行の想定を維持。将来分割されたら要調整
+            raw_line = rows[row_idx][0] if len(rows[row_idx]) == 1 else ",".join(rows[row_idx])
+            line_no = int(float(line_starts[disp_idx]))  # "N.0" → N
+
+            # 行内の RE を全部拾う（ハイライト用 & 統計用）
+            re_iters = list(RE_FIELD.finditer(raw_line))
+            if not re_iters:
+                self.no_re_line_count += 1
                 continue
-            row_string = "|".join(rows[row_idx])
-            for m in self.regex.finditer(row_string):
-                line = int(float(line_starts[disp_idx]))        # 1-indexed
 
+            self.re_line_count += 1
+            self.re_token_count += len(re_iters)
+
+            # ★ 各 RE の "RE" 文字部分だけ黄色で塗る
+            for m_re in re_iters:
+                inner = re.search(r'RE', raw_line[m_re.start():m_re.end()], re.IGNORECASE)
+                if inner:
+                    re_s = m_re.start() + inner.start()
+                    re_e = re_s + 2
+                    self.re_spans.append((f"{line_no}.{re_s}", f"{line_no}.{re_e}"))
+
+            # ★ 既存の患者コードスキャンは「先頭の RE 以降」を対象
+            search_from = re_iters[0].end()
+            for m in self.regex.finditer(raw_line, search_from):
                 code = m.group(1)
-                if detect_mode == 1 and "-" in code:         # 任意記号モード限定
-                    prefix_len = code.find("-")              # ハイフンまでの長さ
-                    p_start = f"{line}.{m.start(1)}"         # group(1) の先頭
-                    p_end   = f"{line}.{m.start(1)+prefix_len}"
+
+                if detect_mode == 1 and "-" in code:
+                    p_start = f"{line_no}.{m.start(1)}"
+                    p_end   = f"{line_no}.{m.start(1) + code.find('-')}"
                     self.prefix_spans.append((p_start, p_end))
-                
-                tag  = "hit"
 
-                # 枝番処理 --------------------------
-                if self.branch_mode == 1 and len(code) >= 1:
-                    if code[-1:] in self.br_1d:
-                        suf_ofs = len(code) - 1
-                        b_s = f"{line}.{m.start()+1+suf_ofs}"
-                        b_e = f"{line}.{m.start()+1+suf_ofs+1}"
-                        self.branch_spans.append((b_s, b_e))
-                elif self.branch_mode == 2 and len(code) >= 2:
-                    if code[-2:] in self.br_2d:
-                        suf_ofs = len(code) - 2
-                        b_s = f"{line}.{m.start()+1+suf_ofs}"
-                        b_e = f"{line}.{m.start()+1+suf_ofs+2}"
-                        self.branch_spans.append((b_s, b_e))
+                # 枝番着色
+                if self.branch_mode == 1 and len(code) >= 1 and code[-1:] in self.br_1d:
+                    suf_ofs = len(code) - 1
+                    b_s = f"{line_no}.{m.start()+1+suf_ofs}"
+                    b_e = f"{line_no}.{m.start()+1+suf_ofs+1}"
+                    self.branch_spans.append((b_s, b_e))
+                elif self.branch_mode == 2 and len(code) >= 2 and code[-2:] in self.br_2d:
+                    suf_ofs = len(code) - 2
+                    b_s = f"{line_no}.{m.start()+1+suf_ofs}"
+                    b_e = f"{line_no}.{m.start()+1+suf_ofs+2}"
+                    self.branch_spans.append((b_s, b_e))
 
-                start = f"{line}.{m.start()}"
-                end   = f"{line}.{m.end()}"
-                self.matches.append((start, end, tag))
+                start = f"{line_no}.{m.start()}"
+                end   = f"{line_no}.{m.end()}"
+                self.matches.append((start, end, "hit"))
 
     # ---------------- 描画 ----------------
     def _clear_tags(self):
         self.txt.tag_remove("hit", "1.0", "end")
         self.txt.tag_remove("single", "1.0", "end")
         self.txt.tag_remove("branch", "1.0", "end")
-        self.txt.tag_remove("prefix", "1.0", "end") 
+        self.txt.tag_remove("prefix", "1.0", "end")
+        self.txt.tag_remove("re", "1.0", "end")
 
     def draw_all(self):
-        """全件（黄 or 赤）モードで描画"""
         self.focus_idx = -1
         self.txt.config(state="normal")
         self._clear_tags()
+        # コード全件
         for s, e, tag in self.matches:
-            self.txt.tag_add(tag, s, e)           # hit / single
-        for s, e in self.branch_spans:            # 枝番部分を赤で上書き
+            self.txt.tag_add(tag, s, e)
+        # 枝番
+        for s, e in self.branch_spans:
             self.txt.tag_add("branch", s, e)
-        for s, e in self.prefix_spans:          # ★水色を最後に重ねる
+        # 任意記号の前半
+        for s, e in self.prefix_spans:
             self.txt.tag_add("prefix", s, e)
+        # ★ REタグ（最後でもOK。コードと位置が被らない想定）
+        for s, e in self.re_spans:
+            self.txt.tag_add("re", s, e)
         self.txt.config(state="disabled")
 
     def draw_single(self, idx: int):
-        """idx 番目を緑／赤でフォーカス描画"""
         if not self.matches:
             return
         self.focus_idx = idx % len(self.matches)
         s, e, tag = self.matches[self.focus_idx]
-        # 緑優先 → 枝番一致でもフォーカス時は緑に
         focus_tag = "single" if tag == "hit" else "branch"
         self.txt.config(state="normal")
         self._clear_tags()
-        self.txt.tag_add(focus_tag, s, e)         # コード全体 (緑／黄)
-        for b_s, b_e in self.branch_spans:        # 赤は常に重ねる
+        self.txt.tag_add(focus_tag, s, e)
+        for b_s, b_e in self.branch_spans:
             self.txt.tag_add("branch", b_s, b_e)
-        for s, e in self.prefix_spans:          # ★水色を最後に重ねる
-            self.txt.tag_add("prefix", s, e)
+        for ps, pe in self.prefix_spans:
+            self.txt.tag_add("prefix", ps, pe)
+        # ★ REタグも常に表示
+        for rs, re_ in self.re_spans:
+            self.txt.tag_add("re", rs, re_)
         self.txt.see(s)
         self.txt.config(state="disabled")
