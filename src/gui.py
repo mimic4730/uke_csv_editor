@@ -4,6 +4,8 @@ import datetime, re, tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 from pathlib import Path
 from typing import List, Optional
+import json
+import csv
 
 import branch_manager as bm
 import highlighter
@@ -17,7 +19,8 @@ class UKEEditorGUI(tk.Tk):
         super().__init__()
         self.title("UKE CSV Editor")
         self.geometry("900x540")
-        self.resizable(False, False)
+        self.minsize(900, 540)
+        self.resizable(True, True)        
 
         # === データ ===
         self.file_path: Optional[Path] = None
@@ -39,7 +42,11 @@ class UKEEditorGUI(tk.Tk):
         self.custom_sym  = tk.StringVar(value=",")
         self.hl = highlighter.Highlighter(self.row_text)
         self.hl.detect_mode_current = self.detect_mode.get()
-        self.highlight_pat = None 
+        self.highlight_pat = None
+        
+        # 前回サイズを復元・終了時に保存
+        self._restore_geometry()
+        self.protocol("WM_DELETE_WINDOW", self._save_geometry_and_quit)        
 
     # ────────────────────────── UI 構築 ──────────────────────────
     def _build_toolbar(self):
@@ -79,7 +86,7 @@ class UKEEditorGUI(tk.Tk):
         # 右: 行内容
         self.row_text = tk.Text(list_frame, wrap="none", width=120, height=25)
         self.row_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tk.Label(list_frame, text="内容").pack(side=tk.LEFT, anchor=tk.NW)
+        self._insert_help_text()
 
         # 下: 変換して保存
         bottom = tk.Frame(self); bottom.pack(side=tk.BOTTOM, pady=8)
@@ -310,32 +317,67 @@ class UKEEditorGUI(tk.Tk):
         RE_FIELD = re.compile(r'(^|,)\s*"?RE"?\s*(,|$)', re.IGNORECASE)
 
         out_lines: list[str] = []
-        for row in self.rows:
+        changes_rows: list[list[str]] = []   # ★変更ログ: [line_no, old_code, new_code, old_line, new_line]
+
+        for idx, row in enumerate(self.rows, 1):  # ★行番号は1始まり
             line = ",".join(row)
             m_re = RE_FIELD.search(line)
             if not m_re:
-                # RE がない行はそのまま
                 out_lines.append(line)
                 continue
 
-            head = line[:m_re.end()]     # REまで（含む）
-            tail = line[m_re.end():]     # ★RE以降だけ置換
-            tail_fixed = pat.sub(lambda m: f",{self._format_code(m.group(1))}{tc}", tail)
-            out_lines.append(head + tail_fixed)
+            head = line[:m_re.end()]         # RE まで（含む）
+            tail = line[m_re.end():]         # RE 以降のみ置換対象
 
-        # ---- ファイル名：8.3 形式 + .UKE ----
+            # ★マッチ一覧を先に取り出しておく（複数マッチ対応）
+            matches = list(pat.finditer(tail))
+            if not matches:
+                out_lines.append(line)
+                continue
+
+            # ★置換（format_codeを適用）
+            def _repl(m: re.Match) -> str:
+                return f",{self._format_code(m.group(1))}{tc}"
+
+            tail_fixed = pat.sub(_repl, tail)
+            fixed_line = head + tail_fixed
+            out_lines.append(fixed_line)
+
+            # ★変更ログに追記（行内に複数コードがあればその分出す）
+            for m in matches:
+                old = m.group(1)
+                new = self._format_code(old)
+                changes_rows.append([str(idx), old, new, line, fixed_line])
+
+        # ---- 変換後 UKE を保存（既存ロジック）----
         base = self.file_path
         assert base is not None
         stem = re.sub(r'[^A-Za-z0-9]', '', base.stem) or "F"
         stem = (stem[:1] + datetime.datetime.now().strftime("%y%m%d%H"))[:8]
         out_path = base.with_name(stem.upper() + ".UKE")
 
-        # ---- Shift‑JIS・CRLF・各行を二重引用 ----
         with out_path.open("w", encoding="cp932", newline="") as f:
             for line in out_lines:
-                f.write(f"{line}\r\n")   
+                f.write(f"{line}\r\n")
 
-        messagebox.showinfo("完了", f"変換後ファイルを保存しました:\n{out_path}")
+        # ---- ★変更ログCSVを保存（同じフォルダ）----
+        map_path = None
+        try:
+            if changes_rows:
+                # 例: <元ファイル名>_changes.csv
+                map_path = base.with_name(f"{base.stem}_changes.csv")
+                with map_path.open("w", encoding="cp932", newline="") as f:
+                    writer = csv.writer(f, lineterminator="\r\n")
+                    writer.writerow(["line_no", "original_code", "converted_code", "original_line", "converted_line"])
+                    writer.writerows(changes_rows)
+        except Exception as e:
+            messagebox.showwarning("警告", f"変更ログの保存に失敗しました: {e}")
+
+        # ---- 完了メッセージ ----
+        msg = f"変換後ファイルを保存しました:\n{out_path}"
+        if map_path:
+            msg += f"\n\n変更ログ(CSV)を保存しました:\n{map_path}"
+        messagebox.showinfo("完了", msg)
         self.status.set(f"保存完了: {out_path.name}")
 
     # ---------- ファイルリネーム ----------
@@ -394,8 +436,6 @@ class UKEEditorGUI(tk.Tk):
         dialog.geometry("+{}+{}".format(
             self.winfo_rootx() + 100,   # メイン窓から少し右
             self.winfo_rooty() + 80))   # 少し下に配置
-        dialog.minsize(600, 1)          # 最小幅 480px に固定
-        dialog.resizable(False, False)
 
         # ── 患者コード設定 ──────────────────
         tk.Label(dialog, text="患者コード桁数（ハイライト用）").grid(row=0, column=0, sticky="w", padx=4, pady=4)
@@ -453,6 +493,66 @@ class UKEEditorGUI(tk.Tk):
 
         dialog.grab_set()
 
+    # ────────────────────────── ウィンドウサイズ保存/復元 ──────────────────────────
+    def _restore_geometry(self):
+        """前回終了時のウィンドウサイズ・位置を復元"""
+        try:
+            p = Path.home() / ".uke_editor_ui.json"
+            if p.exists():
+                g = json.loads(p.read_text(encoding="utf-8"))
+                geo = g.get("geometry")
+                if geo:
+                    self.geometry(geo)
+        except Exception:
+            # 読み込み失敗時は無視（初回や壊れたファイル想定）
+            pass
+
+    def _save_geometry_and_quit(self):
+        """現在のウィンドウサイズ・位置を保存して終了"""
+        try:
+            p = Path.home() / ".uke_editor_ui.json"
+            p.write_text(json.dumps({"geometry": self.geometry()}), encoding="utf-8")
+        except Exception:
+            # 保存失敗しても終了は継続
+            pass
+        self.destroy()
+
+    def _insert_help_text(self):
+        """起動時にテキストボックスへ簡易ヘルプを表示"""
+        HELP_TEXT = (
+            "UKE CSV Editor - 使い方ガイド\n"
+            "================================\n"
+            "1) 読み込みファイルをリネーム: 選んだ .UKE のファイル名を整えます。\n"
+            "2) ファイル読み込み: UKE/CSV を読み込みます。\n"
+            "3) 全行表示: フィルタを解除して全行を再表示します。\n"
+            "4) 設定: ハイライト桁数/変換桁数/後方カンマ/枝番処理/判定ロジックを変更。\n"
+            "\n"
+            "【ハイライト】\n"
+            "- 患者コード・全行ハイライト: RE 以降の患者コードを検出して色付け。\n"
+            "    ・コード全体: 黄, 枝番: 赤, ハイフン前まで: 水色\n"
+            "    ・ステータスバーに RE 統計（REあり/なし行数・RE個数）を表示\n"
+            "- 先頭 1 件ハイライト / 次の行へ: 一致箇所を順送り表示\n"
+            "- ハイライト解除: すべてのハイライトを消去\n"
+            "\n"
+            "【出力】\n"
+            "- コード変換して保存: 枝番除去→桁揃え後、RE 以降のみ置換して .UKE を保存\n"
+            "\n"
+            "【設定のポイント】\n"
+            "・患者コード桁数（ハイライト用）: 検出時の桁数。後方カンマ=ちょうどN桁／任意記号=1〜N桁。\n"
+            "・患者コード変換桁数: 保存時の桁数。長い→左をカット／短い→左0埋め（例: 123→0000000123）。\n"
+            "・後方カンマ数: コード直後に続くカンマの個数。入力フォーマットに合わせて設定。\n"
+            "・枝番処理: 「枝番登録」で指定した1桁/2桁を変換時に末尾から除去。ハイライトでは該当部分を赤表示。\n"
+            "・判定ロジック: 「後方カンマ数」はフォーマット固定向け／「任意の記号」は 12603-0002 のような記号区切り向け。\n"
+            "\n"
+            "※『枝番登録』で登録した枝番は保存され、次回起動後も有効です。\n"
+            "（保存先: モジュールと同じフォルダの branches.json。配布形態によりホーム配下に切替えることがあります）"
+            "\n"
+            "ヒント: まず『ファイル読み込み』→『患者コード・全行ハイライト』の順で試すと流れが掴みやすいです。\n"
+        )
+        self.row_text.config(state="normal")
+        self.row_text.delete("1.0", "end")
+        self.row_text.insert("1.0", HELP_TEXT)
+        self.row_text.config(state="disabled")
 
 
 if __name__ == "__main__":

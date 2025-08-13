@@ -3,7 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Dict, List, Literal
+import os, sys  # ★追加
 
+def _default_store() -> Path:
+    p = Path(__file__).with_name("branches.json")
+    # 凍結実行や書き込み不可ディレクトリならホーム配下へ
+    if getattr(sys, "frozen", False) or not os.access(p.parent, os.W_OK):
+        p = Path.home() / ".uke_editor" / "branches.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+_DEFAULT_JSON = _default_store()
 # 保存先 …/src/branches.json
 _DEFAULT_JSON = Path(__file__).with_name("branches.json")
 
