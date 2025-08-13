@@ -104,3 +104,37 @@ def save_csv(base_path: Path, rows: List[List[str]]) -> Path:
         csv.writer(f).writerows(rows)
 
     return out_path
+
+
+def build_output_path_from_input(input_path: str | Path, out_dir: str | Path | None = None) -> Path:
+    """
+    入力: C:\data\original.csv
+    出力: C:\data\修正後_original.csv
+    すでに存在する場合は 修正後_original(2).csv, (3)... と重複回避
+    """
+    inpath = Path(input_path)
+    base_dir = Path(out_dir) if out_dir else inpath.parent
+    candidate = base_dir / f"修正後_{inpath.name}"
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem         # 例: 修正後_original
+    suffix = candidate.suffix     # 例: .csv
+    i = 2
+    while True:
+        c = base_dir / f"{stem}({i}){suffix}"
+        if not c.exists():
+            return c
+        i += 1
+
+
+def save_csv_like_excel(rows: list[list[str]], output_path: str | Path, encoding: str = "utf-8-sig") -> Path:
+    """
+    2次元配列 rows を CSV で保存。Excelで開きやすい UTF-8 BOM 付き。
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", newline="", encoding=encoding) as f:
+        writer = csv.writer(f)
+        writer.writerows(rows)
+    return output_path

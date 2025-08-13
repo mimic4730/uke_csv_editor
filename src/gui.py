@@ -9,7 +9,7 @@ import csv
 
 import branch_manager as bm
 import highlighter
-from editor import load_csv
+from editor import load_csv, build_output_path_from_input, save_csv_like_excel
 
 DISPLAY_COL = 0   # フィルタ用列（先頭列）
 
@@ -317,69 +317,95 @@ class UKEEditorGUI(tk.Tk):
         RE_FIELD = re.compile(r'(^|,)\s*"?RE"?\s*(,|$)', re.IGNORECASE)
 
         out_lines: list[str] = []
-        changes_rows: list[list[str]] = []   # ★変更ログ: [line_no, old_code, new_code, old_line, new_line]
+        changes_rows: list[list[str]] = []   # [line_no, old_code, new_code, original_line, converted_line]
+        error_rows: list[list[str]] = []     # [line_no, codes_joined, reason, original_line]
 
-        for idx, row in enumerate(self.rows, 1):  # ★行番号は1始まり
+        for idx, row in enumerate(self.rows, 1):
             line = ",".join(row)
+
+            # --- RE が無い行はそのまま ---
             m_re = RE_FIELD.search(line)
             if not m_re:
                 out_lines.append(line)
                 continue
 
-            head = line[:m_re.end()]         # RE まで（含む）
-            tail = line[m_re.end():]         # RE 以降のみ置換対象
+            head = line[:m_re.end()]        # RE まで（含む）
+            tail = line[m_re.end():]        # RE 以降のみ置換対象
 
-            # ★マッチ一覧を先に取り出しておく（複数マッチ対応）
+            # --- RE はあるがコード未検出 → エラー(no_code_detected) ---
             matches = list(pat.finditer(tail))
             if not matches:
-                out_lines.append(line)
+                error_rows.append([str(idx), "", "no_code_detected", line])
+                out_lines.append(line)  # そのまま出力
                 continue
 
-            # ★置換（format_codeを適用）
+            # --- 置換実行（1文字でも変わったかを later に判定する） ---
+            changed_any = False
+            matched_codes = []
+
             def _repl(m: re.Match) -> str:
-                return f",{self._format_code(m.group(1))}{tc}"
+                nonlocal changed_any
+                old = m.group(1)
+                new = self._format_code(old)  # 枝番除去→桁揃え（既存ロジック）
+                matched_codes.append(old)
+                if new != old:
+                    changed_any = True
+                    changes_rows.append([str(idx), old, new, line, None])
+                return f",{new}{tc}"
 
             tail_fixed = pat.sub(_repl, tail)
             fixed_line = head + tail_fixed
             out_lines.append(fixed_line)
 
-            # ★変更ログに追記（行内に複数コードがあればその分出す）
-            for m in matches:
-                old = m.group(1)
-                new = self._format_code(old)
-                changes_rows.append([str(idx), old, new, line, fixed_line])
+            # changes_rows の converted_line を埋める
+            if changed_any:
+                for r in changes_rows:
+                    if r[0] == str(idx) and r[4] is None:
+                        r[4] = fixed_line
 
-        # ---- 変換後 UKE を保存（既存ロジック）----
-        base = self.file_path
-        assert base is not None
-        stem = re.sub(r'[^A-Za-z0-9]', '', base.stem) or "F"
-        stem = (stem[:1] + datetime.datetime.now().strftime("%y%m%d%H"))[:8]
-        out_path = base.with_name(stem.upper() + ".UKE")
+            # --- 置換は試みたが、結果が全く変わっていない → エラー(no_change) ---
+            if not changed_any and fixed_line == line:
+                # 行内に複数コードがあってもまとめて出す（見やすさ優先）
+                joined = " ".join(dict.fromkeys(matched_codes))  # 重複除去して順序保持
+                error_rows.append([str(idx), joined, "no_change", line])
 
-        with out_path.open("w", encoding="cp932", newline="") as f:
+        # ---- 出力名：修正後_元のファイル名（重複時は (2)…）----
+        base = self.file_path; assert base is not None
+        out_path = build_output_path_from_input(base)
+
+        with open(out_path, "w", encoding="cp932", newline="") as f:
             for line in out_lines:
                 f.write(f"{line}\r\n")
 
-        # ---- ★変更ログCSVを保存（同じフォルダ）----
+        # ---- 変更ログCSV ----
         map_path = None
-        try:
-            if changes_rows:
-                # 例: <元ファイル名>_changes.csv
-                map_path = base.with_name(f"{base.stem}_changes.csv")
-                with map_path.open("w", encoding="cp932", newline="") as f:
-                    writer = csv.writer(f, lineterminator="\r\n")
-                    writer.writerow(["line_no", "original_code", "converted_code", "original_line", "converted_line"])
-                    writer.writerows(changes_rows)
-        except Exception as e:
-            messagebox.showwarning("警告", f"変更ログの保存に失敗しました: {e}")
+        if changes_rows:
+            map_path = out_path.with_name(f"{out_path.stem}_changes.csv")
+            with open(map_path, "w", encoding="cp932", newline="") as f:
+                import csv
+                writer = csv.writer(f, lineterminator="\r\n")
+                writer.writerow(["line_no", "original_code", "converted_code", "original_line", "converted_line"])
+                writer.writerows(changes_rows)
 
-        # ---- 完了メッセージ ----
+        # ---- エラー行CSV（REあり＆未変換）----
+        err_path = None
+        if error_rows:
+            err_path = out_path.with_name(f"{out_path.stem}_エラー行.csv")
+            with open(err_path, "w", encoding="cp932", newline="") as f:
+                import csv
+                writer = csv.writer(f, lineterminator="\r\n")
+                writer.writerow(["line_no", "matched_codes", "error_reason", "original_line"])
+                writer.writerows(error_rows)
+
+        # ---- 完了表示 ----
         msg = f"変換後ファイルを保存しました:\n{out_path}"
         if map_path:
             msg += f"\n\n変更ログ(CSV)を保存しました:\n{map_path}"
+        if err_path:
+            msg += f"\n\nエラー行(CSV)を保存しました:\n{err_path}"
         messagebox.showinfo("完了", msg)
         self.status.set(f"保存完了: {out_path.name}")
-
+        
     # ---------- ファイルリネーム ----------
     def rename_files(self):
         # ……元の rename_files 実装をそのまま残す……
