@@ -413,25 +413,18 @@ class UKEEditorGUI(tk.Tk):
         else:                      # 短い／同じ → 0 埋め
             return code.zfill(L)
 
-    def _format_code_force_branch(self, raw: str, out_len: int | None = None) -> str:
+
+    def _format_code_force_branch_general(self, raw: str, in_len: int, out_len: int) -> str:
         """
-        フォールバック専用：
-        - 枝番設定や登録枝番を一切無視
-        - 10桁以上なら「先頭4桁を除去」してから
-        - 最終的に out_len（既定: self.patient_code_conv_len=6）に整形
-            * 長い → 末尾 out_len 桁
-            * 短い → 左ゼロ埋め
-        例）raw="1234567890" → 先頭4桁除去で "567890" → そのまま6桁
+        フォールバック汎用版：
+        - 枝番設定は無視
+        - 入力桁 in_len を想定し、右端 out_len 桁を採用（足りなければ左0埋め）
         """
         s = (raw or "").strip()
-        L = out_len if out_len is not None else self.patient_code_conv_len  # 通常 6
-
-        # 10桁以上のときは「頭4桁を削る」ポリシー
-        if len(s) >= 10:
-            s = s[4:]
-
-        # 最終整形（常に右寄せで out_len 桁）
-        return s[-L:].zfill(L)
+        # in_len はマッチ側で保証されるが、念のため数字以外は触らない
+        if not s.isdigit():
+            return s
+        return s[-out_len:].zfill(out_len)
 
     def convert_and_save(self):
         if not self.rows:
@@ -441,13 +434,19 @@ class UKEEditorGUI(tk.Tk):
             messagebox.showinfo("情報", "ハイライトされた患者コードがありません。")
             return
 
-        # 変換処理は converter モジュールへ委譲
+        # フォールバックの桁数（設定から）
+        branch_digits = {0: 0, 1: 1, 2: 2}.get(self.br_mode.get(), 0)
+        fb_in_len  = max(1, self.patient_code_len - branch_digits)
+        fb_out_len = self.patient_code_conv_len
+
         out_lines, changes_rows, error_rows = converter.convert_rows(
             rows=self.rows,
             regex=self.hl.regex,
             trailing_commas=self.trailing_commas,
-            primary_fn=self._format_code,              # 第1段
-            fallback_fn=self._format_code_force_branch # 第2段（先頭4桁除去→6桁）
+            primary_fn=self._format_code,
+            fallback_fn=lambda s: self._format_code_force_branch_general(s, fb_in_len, fb_out_len),
+            fallback_in_len=fb_in_len,
+            fallback_out_len=fb_out_len,
         )
 
         # 出力（UKE と ログ）
@@ -650,7 +649,7 @@ class UKEEditorGUI(tk.Tk):
             "■ 変換（保存時の処理）\n"
             "  - 第1段（通常）: 登録枝番を考慮して枝番を除去 → 指定桁数に整形。\n"
             "  - 第2段（フォールバック）: 第1段で変わらなかった場合、\n"
-            "      『10桁』を対象に **先頭4桁を除去して6桁化**（枝番設定は無視）。\n"
+            "      患者コード桁数 − 枝番桁数 → 変換桁数　へ変換します。\n"
             "  - 変換結果は同じフォルダ内の**日付フォルダ**に保存します：\n"
             "      ・UKE     → 修正後UKE_yyyymmdd/修正後_<元ファイル名>.UKE\n"
             "      ・変更ログ → 修正ログ_yyyymmdd/修正後_<元ファイル名>_changes.csv\n"
