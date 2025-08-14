@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # src/gui.py
 import datetime, re, tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
@@ -9,7 +8,8 @@ import csv
 
 import branch_manager as bm
 import highlighter
-from editor import load_csv, build_output_path_from_input, save_csv_like_excel
+from editor import load_csv, build_uke_output_path, build_log_paths
+import converter
 
 DISPLAY_COL = 0   # フィルタ用列（先頭列）
 
@@ -47,6 +47,9 @@ class UKEEditorGUI(tk.Tk):
         # 前回サイズを復元・終了時に保存
         self._restore_geometry()
         self.protocol("WM_DELETE_WINDOW", self._save_geometry_and_quit)        
+        
+        _ = bm.list_suffixes(1); _ = bm.list_suffixes(2)  # 初回ロード
+        self.bind_all("<Control-b>", lambda e: self.register_branches())
 
     # ────────────────────────── UI 構築 ──────────────────────────
     def _build_toolbar(self):
@@ -304,6 +307,26 @@ class UKEEditorGUI(tk.Tk):
         else:                      # 短い／同じ → 0 埋め
             return code.zfill(L)
 
+    def _format_code_force_branch(self, raw: str, out_len: int | None = None) -> str:
+        """
+        フォールバック専用：
+        - 枝番設定や登録枝番を一切無視
+        - 10桁以上なら「先頭4桁を除去」してから
+        - 最終的に out_len（既定: self.patient_code_conv_len=6）に整形
+            * 長い → 末尾 out_len 桁
+            * 短い → 左ゼロ埋め
+        例）raw="1234567890" → 先頭4桁除去で "567890" → そのまま6桁
+        """
+        s = (raw or "").strip()
+        L = out_len if out_len is not None else self.patient_code_conv_len  # 通常 6
+
+        # 10桁以上のときは「頭4桁を削る」ポリシー
+        if len(s) >= 10:
+            s = s[4:]
+
+        # 最終整形（常に右寄せで out_len 桁）
+        return s[-L:].zfill(L)
+
     def convert_and_save(self):
         if not self.rows:
             messagebox.showwarning("警告", "まず CSV ファイルを読み込んでください。")
@@ -312,100 +335,52 @@ class UKEEditorGUI(tk.Tk):
             messagebox.showinfo("情報", "ハイライトされた患者コードがありません。")
             return
 
-        pat = self.hl.regex
-        tc  = "," * self.trailing_commas
-        RE_FIELD = re.compile(r'(^|,)\s*"?RE"?\s*(,|$)', re.IGNORECASE)
+        # 変換処理は converter モジュールへ委譲
+        out_lines, changes_rows, error_rows = converter.convert_rows(
+            rows=self.rows,
+            regex=self.hl.regex,
+            trailing_commas=self.trailing_commas,
+            primary_fn=self._format_code,              # 第1段
+            fallback_fn=self._format_code_force_branch # 第2段（先頭4桁除去→6桁）
+        )
 
-        out_lines: list[str] = []
-        changes_rows: list[list[str]] = []   # [line_no, old_code, new_code, original_line, converted_line]
-        error_rows: list[list[str]] = []     # [line_no, codes_joined, reason, original_line]
-
-        for idx, row in enumerate(self.rows, 1):
-            line = ",".join(row)
-
-            # --- RE が無い行はそのまま ---
-            m_re = RE_FIELD.search(line)
-            if not m_re:
-                out_lines.append(line)
-                continue
-
-            head = line[:m_re.end()]        # RE まで（含む）
-            tail = line[m_re.end():]        # RE 以降のみ置換対象
-
-            # --- RE はあるがコード未検出 → エラー(no_code_detected) ---
-            matches = list(pat.finditer(tail))
-            if not matches:
-                error_rows.append([str(idx), "", "no_code_detected", line])
-                out_lines.append(line)  # そのまま出力
-                continue
-
-            # --- 置換実行（1文字でも変わったかを later に判定する） ---
-            changed_any = False
-            matched_codes = []
-
-            def _repl(m: re.Match) -> str:
-                nonlocal changed_any
-                old = m.group(1)
-                new = self._format_code(old)  # 枝番除去→桁揃え（既存ロジック）
-                matched_codes.append(old)
-                if new != old:
-                    changed_any = True
-                    changes_rows.append([str(idx), old, new, line, None])
-                return f",{new}{tc}"
-
-            tail_fixed = pat.sub(_repl, tail)
-            fixed_line = head + tail_fixed
-            out_lines.append(fixed_line)
-
-            # changes_rows の converted_line を埋める
-            if changed_any:
-                for r in changes_rows:
-                    if r[0] == str(idx) and r[4] is None:
-                        r[4] = fixed_line
-
-            # --- 置換は試みたが、結果が全く変わっていない → エラー(no_change) ---
-            if not changed_any and fixed_line == line:
-                # 行内に複数コードがあってもまとめて出す（見やすさ優先）
-                joined = " ".join(dict.fromkeys(matched_codes))  # 重複除去して順序保持
-                error_rows.append([str(idx), joined, "no_change", line])
-
-        # ---- 出力名：修正後_元のファイル名（重複時は (2)…）----
+        # 出力（UKE と ログ）
         base = self.file_path; assert base is not None
-        out_path = build_output_path_from_input(base)
-
+        out_path = build_uke_output_path(base)
         with open(out_path, "w", encoding="cp932", newline="") as f:
             for line in out_lines:
                 f.write(f"{line}\r\n")
 
-        # ---- 変更ログCSV ----
-        map_path = None
+        map_path = err_path = None
+        changes_out, errors_out = build_log_paths(base, out_path)
+
         if changes_rows:
-            map_path = out_path.with_name(f"{out_path.stem}_changes.csv")
+            map_path = changes_out
             with open(map_path, "w", encoding="cp932", newline="") as f:
-                import csv
                 writer = csv.writer(f, lineterminator="\r\n")
-                writer.writerow(["line_no", "original_code", "converted_code", "original_line", "converted_line"])
+                writer.writerow(["line_no", "original_code", "converted_code",
+                                "original_line", "converted_line", "method"])
                 writer.writerows(changes_rows)
 
-        # ---- エラー行CSV（REあり＆未変換）----
-        err_path = None
         if error_rows:
-            err_path = out_path.with_name(f"{out_path.stem}_エラー行.csv")
+            err_path = errors_out
             with open(err_path, "w", encoding="cp932", newline="") as f:
-                import csv
                 writer = csv.writer(f, lineterminator="\r\n")
                 writer.writerow(["line_no", "matched_codes", "error_reason", "original_line"])
                 writer.writerows(error_rows)
 
-        # ---- 完了表示 ----
+        # 完了ダイアログ
+        normal_cnt   = sum(1 for r in changes_rows if r[-1] == "normal")
+        fallback_cnt = sum(1 for r in changes_rows if r[-1] == "fallback")
         msg = f"変換後ファイルを保存しました:\n{out_path}"
         if map_path:
             msg += f"\n\n変更ログ(CSV)を保存しました:\n{map_path}"
+            msg += f"\n  - normal: {normal_cnt} 件 / fallback: {fallback_cnt} 件"
         if err_path:
             msg += f"\n\nエラー行(CSV)を保存しました:\n{err_path}"
         messagebox.showinfo("完了", msg)
         self.status.set(f"保存完了: {out_path.name}")
-        
+
     # ---------- ファイルリネーム ----------
     def rename_files(self):
         # ……元の rename_files 実装をそのまま残す……

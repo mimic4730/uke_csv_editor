@@ -2,8 +2,7 @@
 from pathlib import Path
 import csv, chardet
 from datetime import datetime
-from typing import List, Tuple, Optional
-from io import StringIO
+from typing import List, Tuple
 
 
 def _detect_encoding(path: Path, sample_bytes: int = 4096) -> str:
@@ -94,47 +93,45 @@ def load_csv(path: Path, has_header: bool = True) -> Tuple[List[str], List[List[
         header, body = [], rows
     return header, body
 
-def save_csv(base_path: Path, rows: List[List[str]]) -> Path:
-    ts = datetime.now().strftime('%Y%m%d%H%M%S')
-    out_dir = base_path.parent / f"{base_path.stem}_{ts}"
-    out_dir.mkdir(exist_ok=True)
-
-    out_path = out_dir / f"{base_path.stem}_{ts}.edited.csv"
-    with out_path.open('w', newline='', encoding='utf-8') as f:
-        csv.writer(f).writerows(rows)
-
-    return out_path
-
-
-def build_output_path_from_input(input_path: str | Path, out_dir: str | Path | None = None) -> Path:
+def ensure_output_dirs(input_path: str | Path) -> tuple[Path, Path]:
     """
-    入力: C:\data\original.csv
-    出力: C:\data\修正後_original.csv
-    すでに存在する場合は 修正後_original(2).csv, (3)... と重複回避
+    入力ファイルと同じディレクトリ配下に
+      - 「修正後UKE_yyyymmdd」
+      - 「修正ログ_yyyymmdd」
+    を作成して返す
     """
-    inpath = Path(input_path)
-    base_dir = Path(out_dir) if out_dir else inpath.parent
-    candidate = base_dir / f"修正後_{inpath.name}"
-    if not candidate.exists():
-        return candidate
+    base = Path(input_path).resolve().parent
+    date_str = datetime.now().strftime("%Y%m%d")
+    uke_dir = base / f"修正後UKE_{date_str}"
+    log_dir = base / f"修正ログ_{date_str}"
+    uke_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return uke_dir, log_dir
 
-    stem = candidate.stem         # 例: 修正後_original
-    suffix = candidate.suffix     # 例: .csv
+def _dedup_path(p: Path) -> Path:
+    """ファイル名が重複する場合は (2), (3), ... を付けて回避"""
+    if not p.exists():
+        return p
+    stem, suffix = p.stem, p.suffix
     i = 2
     while True:
-        c = base_dir / f"{stem}({i}){suffix}"
-        if not c.exists():
-            return c
+        cand = p.with_name(f"{stem}({i}){suffix}")
+        if not cand.exists():
+            return cand
         i += 1
 
+def build_uke_output_path(input_path: str | Path) -> Path:
+    """UKE 出力: 修正後UKE_yyyymmdd/修正後_<元ファイル名>"""
+    inpath = Path(input_path)
+    uke_dir, _ = ensure_output_dirs(inpath)
+    out = uke_dir / f"修正後_{inpath.name}"
+    return _dedup_path(out)
 
-def save_csv_like_excel(rows: list[list[str]], output_path: str | Path, encoding: str = "utf-8-sig") -> Path:
+def build_log_paths(input_path: str | Path, uke_out_path: Path) -> tuple[Path, Path]:
     """
-    2次元配列 rows を CSV で保存。Excelで開きやすい UTF-8 BOM 付き。
+    ログ出力: 修正ログ_yyyymmdd/修正後_<元ファイル名>_changes.csv / _エラー行.csv
     """
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", newline="", encoding=encoding) as f:
-        writer = csv.writer(f)
-        writer.writerows(rows)
-    return output_path
+    _, log_dir = ensure_output_dirs(input_path)
+    changes = log_dir / f"{uke_out_path.stem}_changes.csv"
+    errors  = log_dir / f"{uke_out_path.stem}_エラー行.csv"
+    return _dedup_path(changes), _dedup_path(errors)
