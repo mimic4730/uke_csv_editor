@@ -12,12 +12,13 @@ from editor import load_csv, build_uke_output_path, build_log_paths
 import converter
 
 DISPLAY_COL = 0   # フィルタ用列（先頭列）
+APP_VERSION = "v1.6.0"
 
 class UKEEditorGUI(tk.Tk):
     # ────────────────────────── 初期化 ──────────────────────────
     def __init__(self) -> None:
         super().__init__()
-        self.title("UKE CSV Editor")
+        self.title(f"UKE CSV Editor {APP_VERSION}")
         self.geometry("900x540")
         self.minsize(900, 540)
         self.resizable(True, True)        
@@ -48,8 +49,13 @@ class UKEEditorGUI(tk.Tk):
         self._restore_geometry()
         self.protocol("WM_DELETE_WINDOW", self._save_geometry_and_quit)        
         
-        _ = bm.list_suffixes(1); _ = bm.list_suffixes(2)  # 初回ロード
+        # 初回ロード
+        _ = bm.list_suffixes(1); _ = bm.list_suffixes(2)
         self.bind_all("<Control-b>", lambda e: self.register_branches())
+        
+        # 枝番表示パネル
+        self._build_suffix_panel()
+        self._refresh_suffix_panel()
 
     # ────────────────────────── UI 構築 ──────────────────────────
     def _build_toolbar(self):
@@ -76,6 +82,29 @@ class UKEEditorGUI(tk.Tk):
                   command=self.highlight_next_match).grid(row=0, column=2, padx=4, sticky="w")
         tk.Button(f2, text="ハイライト解除", width=18,
                   command=self.clear_highlight).grid(row=0, column=3, padx=4, sticky="w")
+
+    def _build_suffix_panel(self):
+        """登録済み枝番をUIに常時表示（1桁/2桁）"""
+        wrap = tk.Frame(self); wrap.pack(pady=(0,2), padx=8, anchor="w", fill="x")
+
+        tk.Label(wrap, text="登録済み枝番:", font=("", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(0,8))
+
+        self.suffix_ones_var = tk.StringVar(value="")
+        self.suffix_twos_var = tk.StringVar(value="")
+
+        # 1桁
+        tk.Label(wrap, text="1桁").grid(row=0, column=1, sticky="w")
+        tk.Label(wrap, textvariable=self.suffix_ones_var, relief="groove", anchor="w")\
+            .grid(row=0, column=2, sticky="we", padx=(4,16))
+
+        # 2桁
+        tk.Label(wrap, text="2桁").grid(row=0, column=3, sticky="w")
+        tk.Label(wrap, textvariable=self.suffix_twos_var, relief="groove", anchor="w")\
+            .grid(row=0, column=4, sticky="we", padx=(4,0))
+
+        # 横幅に合わせて広がるように
+        wrap.grid_columnconfigure(2, weight=1)
+        wrap.grid_columnconfigure(4, weight=1)
 
     def _build_text_area(self):
         list_frame = tk.Frame(self); list_frame.pack(pady=4, fill=tk.BOTH, expand=True)
@@ -148,16 +177,89 @@ class UKEEditorGUI(tk.Tk):
         # ★ここでステータスバーを更新
         self._update_status_counts()
 
+    def _count_branch_hits(self) -> tuple[int, int, int]:
+        """
+        表示中の行(self.display_indices)を RE 以降だけ self.hl.regex で再スキャンして、
+        枝番のヒット数を数える（ハイライト結果オブジェクトに依存しない）
+        戻り値: (total, one_digit_hits, two_digit_hits)
+        """
+        if not self.hl.regex:
+            return 0, 0, 0
+
+        pat = self.hl.regex
+        RE_FIELD = re.compile(r'(^|,)\s*"?RE"?\s*(,|$)', re.IGNORECASE)
+
+        ones = set(bm.list_suffixes(1))
+        twos = set(bm.list_suffixes(2))
+
+        one_hits = two_hits = 0
+
+        for i in self.display_indices:
+            if i < 0 or i >= len(self.rows):
+                continue
+            line = ",".join(self.rows[i])
+            m_re = RE_FIELD.search(line)
+            if not m_re:
+                continue
+            tail = line[m_re.end():]
+
+            for m in pat.finditer(tail):
+                # Highlighter の正規表現は (患者コード) を 1番キャプチャにしている想定
+                # 念のため group(1) が無ければ group(0) を使う
+                try:
+                    code = m.group(1)
+                except IndexError:
+                    code = m.group(0)
+
+                if len(code) >= 2 and code[-2:] in twos:
+                    two_hits += 1
+                elif len(code) >= 1 and code[-1:] in ones:
+                    one_hits += 1
+
+        return (one_hits + two_hits), one_hits, two_hits
+
     def _update_status_counts(self):
-        """表示行数と現在のハイライト件数 + RE統計をステータスへ反映"""
-        hit_cnt = len(self.hl.matches) if self.hl.regex else 0
-        re_lines = getattr(self.hl, "re_line_count", 0)
-        re_none  = getattr(self.hl, "no_re_line_count", self.visible_count - re_lines)
+        """表示行数とハイライト件数 + RE統計 + 枝番統計（登録数＆ヒット数）をステータスへ反映"""
+        hit_cnt   = len(self.hl.matches) if self.hl.regex else 0
+        re_lines  = getattr(self.hl, "re_line_count", 0)
+        re_none   = getattr(self.hl, "no_re_line_count", self.visible_count - re_lines)
         re_tokens = getattr(self.hl, "re_token_count", 0)
-        self.status.set(
-            f"表示 {self.visible_count} 行　/　ハイライト {hit_cnt} 件　"
-            f"/　REあり {re_lines} 行　/　REなし {re_none} 行　/　RE {re_tokens} 個"
-        )
+
+        status_parts = [
+            f"表示 {self.visible_count} 行",
+            f"ハイライト {hit_cnt} 件",
+            f"REあり {re_lines} 行",
+            f"REなし {re_none} 行",
+            f"RE {re_tokens} 個",
+        ]
+
+        # 枝番モードがオフ以外のときだけ統計を追加
+        if self.br_mode.get() != 0:
+            try:
+                ones_cnt = len(bm.list_suffixes(1))
+                twos_cnt = len(bm.list_suffixes(2))
+            except Exception:
+                ones_cnt = twos_cnt = 0
+
+            br_total, br_1hit, br_2hit = self._count_branch_hits()
+            status_parts.append(f"枝番 登録: 1桁 {ones_cnt}・2桁 {twos_cnt}")
+            status_parts.append(f"枝番ヒット: 合計 {br_total}（1桁 {br_1hit}・2桁 {br_2hit}）")
+            status_parts.append(f"モード: {self._branch_mode_label()}")
+
+        self.status.set(" / ".join(status_parts))
+
+    def _refresh_suffix_panel(self):
+        """branch_manager から取得して表示を更新"""
+        ones = bm.list_suffixes(1)
+        twos = bm.list_suffixes(2)
+
+        # 長くなりすぎないよう、空白区切りで表示。多い場合は末尾に…を付与
+        def _fmt(xs: list[str], limit_chars: int = 60) -> str:
+            s = " ".join(xs)
+            return (s[:limit_chars] + "…") if len(s) > limit_chars else s
+
+        self.suffix_ones_var.set(_fmt(ones))
+        self.suffix_twos_var.set(_fmt(twos))
 
     # --- Listbox フィルタ ---
     def filter_by_code(self, _evt):
@@ -244,6 +346,9 @@ class UKEEditorGUI(tk.Tk):
     # --- 枝番モード変更時に即時再描画 ---
     def _refresh_branch_mode(self):
         self._apply_highlight()
+    
+    def _branch_mode_label(self) -> str:
+        return {0: "オフ", 1: "1桁除去", 2: "2桁除去"}.get(self.br_mode.get(), "オフ")
 
     # ────────────────────────── 枝番登録 / 確認 ──────────────────────────
     def register_branches(self):
@@ -254,6 +359,8 @@ class UKEEditorGUI(tk.Tk):
         try:
             bm.register_suffix(suffix)
             messagebox.showinfo("登録完了", f"枝番 {suffix} を登録しました")
+            self._refresh_suffix_panel()          # UI反映
+            self._update_status_counts()          # 統計反映
         except Exception as e:
             messagebox.showerror("エラー", str(e))
 
@@ -267,7 +374,6 @@ class UKEEditorGUI(tk.Tk):
         messagebox.showinfo("枝番一覧", body.strip())
 
     # ---------- 変換ユーティリティ ----------
-    # ────────── 枝番を除去してから桁揃え ──────────
     def _strip_branch(self, code: str) -> str:
         """
         self.br_mode:
@@ -519,36 +625,52 @@ class UKEEditorGUI(tk.Tk):
         self.destroy()
 
     def _insert_help_text(self):
-        """起動時にテキストボックスへ簡易ヘルプを表示"""
+        """起動時にテキストボックスへ簡易ヘルプを表示（v1.6.0対応）"""
         HELP_TEXT = (
-            "UKE CSV Editor - 使い方ガイド\n"
-            "================================\n"
-            "1) 読み込みファイルをリネーム: 選んだ .UKE のファイル名を整えます。\n"
-            "2) ファイル読み込み: UKE/CSV を読み込みます。\n"
-            "3) 全行表示: フィルタを解除して全行を再表示します。\n"
-            "4) 設定: ハイライト桁数/変換桁数/後方カンマ/枝番処理/判定ロジックを変更。\n"
+            f"UKE CSV Editor {APP_VERSION} - 使い方ガイド\n"
+            "============================================\n"
+            "■ 基本の流れ\n"
+            "  1) 読み込みファイルをリネーム : 選んだ .UKE のファイル名を整えます。\n"
+            "  2) ファイル読み込み           : UKE/CSV を読み込みます。\n"
+            "  3) 患者コード・全行ハイライト : RE 以降の患者コードを検出して色付けします。\n"
+            "  4) コード変換して保存         : 変換して UKE を出力し、ログも保存します。\n"
             "\n"
-            "【ハイライト】\n"
-            "- 患者コード・全行ハイライト: RE 以降の患者コードを検出して色付け。\n"
-            "    ・コード全体: 黄, 枝番: 赤, ハイフン前まで: 水色\n"
-            "    ・ステータスバーに RE 統計（REあり/なし行数・RE個数）を表示\n"
-            "- 先頭 1 件ハイライト / 次の行へ: 一致箇所を順送り表示\n"
-            "- ハイライト解除: すべてのハイライトを消去\n"
+            "■ ハイライト（検出）\n"
+            "  - RE 以降の患者コードを検出して色付けします。\n"
+            "    ・コード全体 : 黄,   枝番 : 赤,   ハイフン前まで : 水色\n"
+            "  - ステータスバーに RE 統計（REあり行/なし行・RE個数）と\n"
+            "    枝番統計（登録数・ハイライト内の枝番ヒット件数・枝番モード）を表示します。\n"
+            "  - 操作: 先頭1件ハイライト / 次の行へ / ハイライト解除\n"
             "\n"
-            "【出力】\n"
-            "- コード変換して保存: 枝番除去→桁揃え後、RE 以降のみ置換して .UKE を保存\n"
+            "■ 枝番（サフィックス）管理\n"
+            "  - 画面上部に『登録済み枝番（1桁/2桁）』を常時表示します。\n"
+            "  - 枝番登録 : Ctrl+B でも起動可能。1～2桁の数字を登録します。\n"
+            "  - 枝番処理モード : オフ / 1桁除去 / 2桁除去（設定から切替）\n"
             "\n"
-            "【設定のポイント】\n"
-            "・患者コード桁数（ハイライト用）: 検出時の桁数。後方カンマ=ちょうどN桁／任意記号=1〜N桁。\n"
-            "・患者コード変換桁数: 保存時の桁数。長い→左をカット／短い→左0埋め（例: 123→0000000123）。\n"
-            "・後方カンマ数: コード直後に続くカンマの個数。入力フォーマットに合わせて設定。\n"
-            "・枝番処理: 「枝番登録」で指定した1桁/2桁を変換時に末尾から除去。ハイライトでは該当部分を赤表示。\n"
-            "・判定ロジック: 「後方カンマ数」はフォーマット固定向け／「任意の記号」は 12603-0002 のような記号区切り向け。\n"
+            "■ 変換（保存時の処理）\n"
+            "  - 第1段（通常）: 登録枝番を考慮して枝番を除去 → 指定桁数に整形。\n"
+            "  - 第2段（フォールバック）: 第1段で変わらなかった場合、\n"
+            "      『10桁』を対象に **先頭4桁を除去して6桁化**（枝番設定は無視）。\n"
+            "  - 変換結果は同じフォルダ内の**日付フォルダ**に保存します：\n"
+            "      ・UKE     → 修正後UKE_yyyymmdd/修正後_<元ファイル名>.UKE\n"
+            "      ・変更ログ → 修正ログ_yyyymmdd/修正後_<元ファイル名>_changes.csv\n"
+            "      ・エラー行 → 修正ログ_yyyymmdd/修正後_<元ファイル名>_エラー行.csv\n"
+            "    ※ 同名がある場合は (2), (3)… と自動で重複回避します。\n"
+            "  - 変更ログには『method 列（normal / fallback）』が付き、\n"
+            "    どの値がどの方法で変換されたかを確認できます。\n"
             "\n"
-            "※『枝番登録』で登録した枝番は保存され、次回起動後も有効です。\n"
-            "（保存先: モジュールと同じフォルダの branches.json。配布形態によりホーム配下に切替えることがあります）"
+            "■ 設定\n"
+            "  - 患者コード桁数（ハイライト用）: 検出時の桁数。\n"
+            "      ・後方カンマ数モード   : ちょうど N 桁\n"
+            "      ・任意の記号モード     : 1～N 桁（例: 12603-0002 → 12603 を検出）\n"
+            "  - 患者コード変換桁数       : 保存時の桁数。長い→左をカット／短い→左0埋め。\n"
+            "  - 後方カンマ数             : コード直後に続く空フィールド数（入力フォーマットに合わせる）。\n"
+            "  - 枝番処理                  : オフ/1桁/2桁 を選択（登録済み枝番を参照）。\n"
             "\n"
-            "ヒント: まず『ファイル読み込み』→『患者コード・全行ハイライト』の順で試すと流れが掴みやすいです。\n"
+            "■ ヒント\n"
+            "  - まず『ファイル読み込み』→『患者コード・全行ハイライト』で検出状況を確認。\n"
+            "  - フォールバックが動いた件数はダイアログと _changes.csv の method=fallback で確認できます。\n"
+            "  - 枝番は Ctrl+B で素早く登録、上部パネルで一覧を確認できます。\n"
         )
         self.row_text.config(state="normal")
         self.row_text.delete("1.0", "end")
