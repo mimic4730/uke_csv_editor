@@ -12,7 +12,7 @@ from editor import load_csv, build_uke_output_path, build_log_paths
 import converter
 
 DISPLAY_COL = 0   # フィルタ用列（先頭列）
-APP_VERSION = "v1.6.0"
+APP_VERSION = "v1.6.3"
 
 class UKEEditorGUI(tk.Tk):
     # ────────────────────────── 初期化 ──────────────────────────
@@ -191,6 +191,9 @@ class UKEEditorGUI(tk.Tk):
 
         ones = set(bm.list_suffixes(1))
         twos = set(bm.list_suffixes(2))
+        
+        L = self.patient_code_len
+        mode = self.br_mode.get()
 
         one_hits = two_hits = 0
 
@@ -211,9 +214,9 @@ class UKEEditorGUI(tk.Tk):
                 except IndexError:
                     code = m.group(0)
 
-                if len(code) >= 2 and code[-2:] in twos:
+                if mode == 2 and len(code) == L + 2 and code[-2:] in twos:
                     two_hits += 1
-                elif len(code) >= 1 and code[-1:] in ones:
+                elif mode == 1 and len(code) == L + 1 and code[-1:] in ones:
                     one_hits += 1
 
         return (one_hits + two_hits), one_hits, two_hits
@@ -273,18 +276,32 @@ class UKEEditorGUI(tk.Tk):
 
     # ────────────────────────── ハイライト操作 ──────────────────────────
     def _setup_highlighter(self):
-        """regex と枝番モードを Highlighter へ反映"""
+        base = self.patient_code_len
+        mode = self.br_mode.get()
+        self.hl.set_base_code_len(self.patient_code_len)
+
+        # ★後方カンマのときだけ {N, N+枝番桁} を許容
+        if self.detect_mode.get() == 0:
+            allowed = {base}
+            if mode == 1:
+                allowed.add(base + 1)
+            elif mode == 2:
+                allowed.add(base + 2)
+            self.hl.set_allowed_code_lengths(sorted(allowed))
+        else:
+            self.hl.set_allowed_code_lengths(None)  # 任意記号モードは従来通り
+
+        # ★許容桁セット後にパターンを構築する（順序が大事）
         pattern = self.hl._build_regex(
             n_digits=self.patient_code_len,
             trailing_commas=self.trailing_commas,
             detect_mode=self.detect_mode.get(),
             custom_sym=self.custom_sym.get()
         )
-        self.hl.set_regex(pattern)      # ← これだけで OK
-        self.highlight_pat = pattern    # 変換用にも保持
+        self.hl.set_regex(pattern)
+        self.highlight_pat = pattern
         self.hl.detect_mode_current = self.detect_mode.get()
 
-        # ❷ 枝番モード
         self.hl.set_branch_mode(
             self.br_mode.get(),
             bm.list_suffixes(1), bm.list_suffixes(2)
@@ -340,6 +357,7 @@ class UKEEditorGUI(tk.Tk):
         self.row_text.tag_remove("single", "1.0", "end")
         self.row_text.tag_remove("branch", "1.0", "end")
         self.row_text.tag_remove("prefix", "1.0", "end")   
+        self.row_text.tag_remove("re", "1.0", "end") 
         self.row_text.config(state="disabled")
         self.status.set(f"表示 {self.visible_count} 行　/　ハイライト 0 件")
 
@@ -375,20 +393,13 @@ class UKEEditorGUI(tk.Tk):
 
     # ---------- 変換ユーティリティ ----------
     def _strip_branch(self, code: str) -> str:
-        """
-        self.br_mode:
-            0 … 何もしない
-            1 … 登録済み 1 桁枝番が付いていれば取り除く
-            2 … 登録済み 2 桁枝番が付いていれば取り除く
-        """
+        L = self.patient_code_len
         mode = self.br_mode.get()
-        if mode == 1 and len(code) > 1:
-            if code[-1:] in bm.list_suffixes(1):
-                return code[:-1]
-        elif mode == 2 and len(code) > 2:
-            if code[-2:] in bm.list_suffixes(2):
-                return code[:-2]
-        return code  # オフ or 不一致 → そのまま
+        if mode == 1 and len(code) == L + 1 and code[-1:] in bm.list_suffixes(1):
+            return code[:-1]
+        elif mode == 2 and len(code) == L + 2 and code[-2:] in bm.list_suffixes(2):
+            return code[:-2]
+        return code
     
     def _format_code(self, raw: str) -> str:
         """枝番を除去してから桁固定"""
@@ -413,7 +424,6 @@ class UKEEditorGUI(tk.Tk):
         else:                      # 短い／同じ → 0 埋め
             return code.zfill(L)
 
-
     def _format_code_force_branch_general(self, raw: str, in_len: int, out_len: int) -> str:
         """
         フォールバック汎用版：
@@ -434,58 +444,139 @@ class UKEEditorGUI(tk.Tk):
             messagebox.showinfo("情報", "ハイライトされた患者コードがありません。")
             return
 
-        # フォールバックの桁数（設定から）
-        branch_digits = {0: 0, 1: 1, 2: 2}.get(self.br_mode.get(), 0)
-        fb_in_len  = max(1, self.patient_code_len - branch_digits)
-        fb_out_len = self.patient_code_conv_len
+        pat = self.hl.regex
+        tc  = "," * self.trailing_commas
+        RE_FIELD = re.compile(r'(^|,)\s*"?RE"?\s*(,|$)', re.IGNORECASE)
 
-        out_lines, changes_rows, error_rows = converter.convert_rows(
-            rows=self.rows,
-            regex=self.hl.regex,
-            trailing_commas=self.trailing_commas,
-            primary_fn=self._format_code,
-            fallback_fn=lambda s: self._format_code_force_branch_general(s, fb_in_len, fb_out_len),
-            fallback_in_len=fb_in_len,
-            fallback_out_len=fb_out_len,
-        )
+        out_lines: list[str] = []
+        # [line_no, old_code, new_code, old_line, new_line, method]
+        changes_rows: list[list[str]] = []
 
-        # 出力（UKE と ログ）
-        base = self.file_path; assert base is not None
-        out_path = build_uke_output_path(base)
-        with open(out_path, "w", encoding="cp932", newline="") as f:
-            for line in out_lines:
-                f.write(f"{line}\r\n")
+        # 集計カウンタ
+        re_token_total = 0          # RE の出現回数（トークン数）
+        target_total   = 0          # 変換対象（RE以降でパターンにヒット）件数
+        converted_total= 0          # 実際に値が変わった件数（normal + fallback）
+        fallback_total = 0          # フォールバックが発動した件数
 
-        map_path = err_path = None
-        changes_out, errors_out = build_log_paths(base, out_path)
+        # フォールバックで落とす桁（枝番モードに追随）
+        fallback_drop = 2 if self.br_mode.get() == 2 else (1 if self.br_mode.get() == 1 else 0)
 
-        if changes_rows:
-            map_path = changes_out
-            with open(map_path, "w", encoding="cp932", newline="") as f:
-                writer = csv.writer(f, lineterminator="\r\n")
-                writer.writerow(["line_no", "original_code", "converted_code",
-                                "original_line", "converted_line", "method"])
-                writer.writerows(changes_rows)
+        for idx, row in enumerate(self.rows, 1):  # 行番号は1始まり
+            line = ",".join(row)
 
-        if error_rows:
-            err_path = errors_out
-            with open(err_path, "w", encoding="cp932", newline="") as f:
-                writer = csv.writer(f, lineterminator="\r\n")
-                writer.writerow(["line_no", "matched_codes", "error_reason", "original_line"])
-                writer.writerows(error_rows)
+            # 行内の RE を全件カウント（通常は1件想定だが念のため）
+            re_all = list(RE_FIELD.finditer(line))
+            re_token_total += len(re_all)
 
-        # 完了ダイアログ
-        normal_cnt   = sum(1 for r in changes_rows if r[-1] == "normal")
-        fallback_cnt = sum(1 for r in changes_rows if r[-1] == "fallback")
+            # 変換は先頭の RE 以降のみ
+            m_re = re_all[0] if re_all else None
+            if not m_re:
+                out_lines.append(line)
+                continue
+
+            head = line[:m_re.end()]         # REまで（含む）
+            tail = line[m_re.end():]         # RE以降のみ置換対象
+
+            # 置換対象のマッチを先に列挙して件数集計
+            matches = list(pat.finditer(tail))
+            target_total += len(matches)
+            if not matches:
+                out_lines.append(line)
+                continue
+
+            # この行の変更記録（置換後に fixed_line を付けてCSVに書く）
+            per_line_changes: list[tuple[str, str, str]] = []  # (old, new, method)
+
+            def _repl(m: re.Match) -> str:
+                nonlocal converted_total, fallback_total
+                old = m.group(1)
+                new = self._format_code(old)   # 通常処理
+                method = "normal"
+
+                L = self.patient_code_len
+                drop = 2 if self.br_mode.get() == 2 else (1 if self.br_mode.get() == 1 else 0)
+
+                # ★通常処理で不変 かつ 「枝番付き長さ」のときだけ発動
+                if new == old and drop > 0 and old.isdigit() and len(old) == L + drop:
+                    forced_core = old[:-drop]
+                    forced_new  = self._normalize_code(forced_core)
+                    if forced_new != old:
+                        new = forced_new
+                        method = "fallback"
+                        fallback_total += 1
+
+                if new != old:
+                    converted_total += 1
+
+                per_line_changes.append((old, new, method))
+                return f",{new}{tc}"
+
+            tail_fixed = pat.sub(_repl, tail)
+            fixed_line = head + tail_fixed
+            out_lines.append(fixed_line)
+
+            # 変更ログ（converted_line を確定させてからまとめて吐く）
+            for old, new, method in per_line_changes:
+                changes_rows.append([str(idx), old, new, line, fixed_line, method])
+
+        # ---- 変換後 UKE を保存 ----
+        base = self.file_path
+        assert base is not None
+        stem = re.sub(r'[^A-Za-z0-9]', '', base.stem) or "F"
+        stem = (stem[:1] + datetime.datetime.now().strftime("%y%m%d%H"))[:8]
+        out_path = base.with_name(stem.upper() + ".UKE")
+
+        with out_path.open("w", encoding="cp932", newline="") as f:
+            for L in out_lines:
+                f.write(f"{L}\r\n")
+
+        # ---- 変更ログCSVを保存（method列を追加）----
+        map_path = None
+        try:
+            if changes_rows:
+                map_path = base.with_name(f"{base.stem}_changes.csv")
+                with map_path.open("w", encoding="cp932", newline="") as f:
+                    writer = csv.writer(f, lineterminator="\r\n")
+                    writer.writerow([
+                        "line_no", "original_code", "converted_code",
+                        "original_line", "converted_line", "method"
+                    ])
+                    writer.writerows(changes_rows)
+        except Exception as e:
+            messagebox.showwarning("警告", f"変更ログの保存に失敗しました: {e}")
+
+        # ---- 集計テキストログを保存 ----
+        unchanged_total = target_total - converted_total
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_path = base.with_name(f"{base.stem}_convert_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.log.txt")
+        try:
+            with log_path.open("w", encoding="cp932", newline="") as f:
+                f.write("UKE CSV Editor Conversion Log\r\n")
+                f.write(f"Timestamp           : {ts}\r\n")
+                f.write(f"Source file         : {self.file_path.name}\r\n")
+                f.write(f"RE件数              : {re_token_total}\r\n")
+                f.write(f"変換対象件数        : {target_total}\r\n")
+                f.write(f"変換した件数        : {converted_total}\r\n")
+                f.write(f"フォールバック件数  : {fallback_total}\r\n")
+                f.write(f"変換できなかった件数: {unchanged_total}\r\n")
+        except Exception as e:
+            messagebox.showwarning("警告", f"テキストログの保存に失敗しました: {e}")
+
+        # ---- 完了メッセージ ----
         msg = f"変換後ファイルを保存しました:\n{out_path}"
         if map_path:
-            msg += f"\n\n変更ログ(CSV)を保存しました:\n{map_path}"
-            msg += f"\n  - normal: {normal_cnt} 件 / fallback: {fallback_cnt} 件"
-        if err_path:
-            msg += f"\n\nエラー行(CSV)を保存しました:\n{err_path}"
+            msg += f"\n変更ログ(CSV): {map_path}"
+        msg += (
+            f"\n\n患者コード 変換対象: {target_total} 件"
+            f"\n患者コード 変換件数: {converted_total} 件"
+            f"\nフォールバック件数: {fallback_total} 件"
+            f"\n変換できなかった件数: {unchanged_total} 件"
+            f"\nRE件数: {re_token_total} 件"
+            f"\nログ: {log_path}"
+        )
         messagebox.showinfo("完了", msg)
-        self.status.set(f"保存完了: {out_path.name}")
-
+        self.status.set(f"保存完了: {out_path.name}（変換 {converted_total}/{target_total} 件, Fallback {fallback_total} 件）")
+    
     # ---------- ファイルリネーム ----------
     def rename_files(self):
         # ……元の rename_files 実装をそのまま残す……

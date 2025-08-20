@@ -27,6 +27,8 @@ class Highlighter:
         self.branch_mode: int = 0          # 0=off / 1=1桁 / 2=2桁
         self.br_1d: List[str] = []         # 登録済み枝番1桁
         self.br_2d: List[str] = []         # 登録済み枝番２桁
+        self.base_code_len = None  # 初期桁数        
+        self.allowed_code_lengths: list[int] | None = None  # 許容桁数   
         
         # (start, end, tag) -- tag は hit / single
         self.matches: List[Tuple[str, str, str]] = []
@@ -56,24 +58,29 @@ class Highlighter:
         self.br_1d = suffixes_1d
         self.br_2d = suffixes_2d
 
-    def _build_regex(self,n_digits: int,trailing_commas: int,detect_mode: int,custom_sym: str) -> re.Pattern:
-        """
-        detect_mode
-            0 … 後方カンマ           → ちょうど n_digits 桁
-            1 … 任意記号（custom_sym）→ 1〜n_digits 桁
-        """
-        charclass = r"[0-9\-]"           # 患者コードに許可する文字
+    def set_base_code_len(self, n: int | None):
+        self.base_code_len = n
 
-        if detect_mode == 0:
-            # ------ 後方カンマ：固定長 ------
-            tc = "," * trailing_commas
-            return re.compile(rf",\s*({charclass}{{{n_digits}}})\s*{tc}")
-
+    def set_allowed_code_lengths(self, lengths: list[int] | None):
+        """後方カンマモード時に許容するコード桁（例: [10, 12]）"""
+        if lengths:
+            self.allowed_code_lengths = sorted({int(L) for L in lengths if isinstance(L, int) and L > 0})
         else:
-            # ------ 任意記号：1〜N 桁 ------
-            rng = f"{{1,{n_digits}}}"    # ← 可変長にするのはここだけ
-            sym = re.escape(custom_sym or "*")
-            return re.compile(rf",\s*({charclass}{rng})\s*{sym}")
+            self.allowed_code_lengths = None
+
+    def _build_regex(self, n_digits: int, trailing_commas: int, detect_mode: int, custom_sym: str) -> re.Pattern:
+        charclass = r"[0-9\-]"
+
+        if detect_mode == 0:  # 後方カンマモード
+            tc = "," * trailing_commas
+            lengths = self.allowed_code_lengths or [n_digits]  # ★許容桁セットがあれば使う
+            group = "|".join(rf"{charclass}{{{L}}}" for L in lengths)
+            return re.compile(rf",\s*({group})\s*{tc}")
+
+        # 任意記号モード（従来通り）
+        rng = f"{{1,{n_digits}}}"
+        sym = re.escape(custom_sym or "*")
+        return re.compile(rf",\s*({charclass}{rng})\s*{sym}")
 
     # ---------------- スキャン ----------------
     def scan(self, rows, display_indices, line_starts):
@@ -86,6 +93,8 @@ class Highlighter:
         self.re_line_count = 0
         self.no_re_line_count = 0
         self.re_token_count = 0
+        
+        base = getattr(self, "base_code_len", None)
 
         detect_mode = getattr(self, "detect_mode_current", 0)
         if self.regex is None:
@@ -129,15 +138,15 @@ class Highlighter:
                     self.prefix_spans.append((p_start, p_end))
 
                 # 枝番着色
-                if self.branch_mode == 1 and len(code) >= 1 and code[-1:] in self.br_1d:
+                if self.branch_mode == 1 and base and len(code) == base + 1 and code[-1:] in self.br_1d:
                     suf_ofs = len(code) - 1
-                    b_s = f"{line_no}.{m.start()+1+suf_ofs}"
-                    b_e = f"{line_no}.{m.start()+1+suf_ofs+1}"
+                    b_s = f"{line_no}.{m.start(1)+suf_ofs}"
+                    b_e = f"{line_no}.{m.start(1)+suf_ofs+1}"
                     self.branch_spans.append((b_s, b_e))
-                elif self.branch_mode == 2 and len(code) >= 2 and code[-2:] in self.br_2d:
+                elif self.branch_mode == 2 and base and len(code) == base + 2 and code[-2:] in self.br_2d:
                     suf_ofs = len(code) - 2
-                    b_s = f"{line_no}.{m.start()+1+suf_ofs}"
-                    b_e = f"{line_no}.{m.start()+1+suf_ofs+2}"
+                    b_s = f"{line_no}.{m.start(1)+suf_ofs}"
+                    b_e = f"{line_no}.{m.start(1)+suf_ofs+2}"
                     self.branch_spans.append((b_s, b_e))
 
                 start = f"{line_no}.{m.start()}"

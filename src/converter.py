@@ -11,7 +11,7 @@ def convert_rows(
     fallback_fn: Callable[[str], str],  # 第2段: フォールバック本体（右端 out_len 桁）
     *,
     fallback_in_len: int,               # ← 追加：フォールバック対象の入力桁数（例: 12-2=10）
-    fallback_out_len: int,              # ← 追加：フォールバックの出力桁数（例: 6）
+
 ) -> Tuple[List[str], List[List[str]], List[List[str]]]:
     out_lines: List[str] = []
     changes_rows: List[List[str]] = []
