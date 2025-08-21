@@ -12,7 +12,8 @@ from editor import load_csv, build_uke_output_path, build_log_paths
 import converter
 
 DISPLAY_COL = 0   # フィルタ用列（先頭列）
-APP_VERSION = "v1.6.3"
+MAX_TRAILING_COMMAS = 30
+APP_VERSION = "v1.7.0"
 
 class UKEEditorGUI(tk.Tk):
     # ────────────────────────── 初期化 ──────────────────────────
@@ -192,8 +193,8 @@ class UKEEditorGUI(tk.Tk):
         ones = set(bm.list_suffixes(1))
         twos = set(bm.list_suffixes(2))
         
-        L = self.patient_code_len
-        mode = self.br_mode.get()
+        L = self.patient_code_len; mode = self.br_mode.get()
+        ones = set(bm.list_suffixes(1)); twos = set(bm.list_suffixes(2))
 
         one_hits = two_hits = 0
 
@@ -207,16 +208,15 @@ class UKEEditorGUI(tk.Tk):
             tail = line[m_re.end():]
 
             for m in pat.finditer(tail):
-                # Highlighter の正規表現は (患者コード) を 1番キャプチャにしている想定
-                # 念のため group(1) が無ければ group(0) を使う
                 try:
                     code = m.group(1)
                 except IndexError:
                     code = m.group(0)
-
-                if mode == 2 and len(code) == L + 2 and code[-2:] in twos:
+                norm = code.replace("-", "")
+                hy = code.split("-",1)[1] if "-" in code else ""
+                if mode == 2 and len(norm) == L + 2 and ((hy and hy in twos) or (not hy and norm[-2:] in twos)):
                     two_hits += 1
-                elif mode == 1 and len(code) == L + 1 and code[-1:] in ones:
+                elif mode == 1 and len(norm) == L + 1 and ((hy and hy in ones) or (not hy and norm[-1:] in ones)):
                     one_hits += 1
 
         return (one_hits + two_hits), one_hits, two_hits
@@ -370,15 +370,18 @@ class UKEEditorGUI(tk.Tk):
 
     # ────────────────────────── 枝番登録 / 確認 ──────────────────────────
     def register_branches(self):
-        suffix = simpledialog.askstring("枝番登録", "枝番 (1〜2 桁) を入力", parent=self)
-        if not suffix: return
-        if not re.fullmatch(r"\d{1,2}", suffix):
-            messagebox.showwarning("入力エラー", "枝番は 0〜99 の数字で入力してください。"); return
+        suffix = simpledialog.askstring("枝番登録", "枝番 (0〜99) または -0〜-99 を入力", parent=self)
+        if not suffix: 
+            return
+        if not re.fullmatch(r"-?\d{1,2}", suffix):
+            messagebox.showwarning("入力エラー", "枝番は 0〜99 または -0〜-99 で入力してください。"); return
         try:
-            bm.register_suffix(suffix)
-            messagebox.showinfo("登録完了", f"枝番 {suffix} を登録しました")
-            self._refresh_suffix_panel()          # UI反映
-            self._update_status_counts()          # 統計反映
+            normalized = suffix.lstrip("-")          # ★ハイフンを落として保存
+            bm.register_suffix(normalized)
+            msg = f"枝番 {suffix} を登録しました（保存値: {normalized}）"
+            messagebox.showinfo("登録完了", msg)
+            self._refresh_suffix_panel()
+            self._update_status_counts()
         except Exception as e:
             messagebox.showerror("エラー", str(e))
 
@@ -402,14 +405,14 @@ class UKEEditorGUI(tk.Tk):
         return code
     
     def _format_code(self, raw: str) -> str:
-        """枝番を除去してから桁固定"""
-        if self.detect_mode.get() == 1 and "-" in raw:
-            raw = raw.split("-", 1)[0]          # 例: "12603-0002" → "12603"
+        # ★ハイフン枝番：登録済みのときだけ左側採用
+        if "-" in raw:
+            left, right = raw.split("-", 1)
+            if (self.br_mode.get() == 2 and right in bm.list_suffixes(2)) or \
+            (self.br_mode.get() == 1 and right in bm.list_suffixes(1)):
+                raw = left  # 枝番除去
 
-        # ★枝番処理（オフならそのまま）
-        raw = self._strip_branch(raw)
-
-        # ★桁数 Fix
+        raw = self._strip_branch(raw)      # 連結型の枝番はここで除去（長さガード済み）
         return self._normalize_code(raw)
     
     def _normalize_code(self, code: str) -> str:
@@ -617,14 +620,20 @@ class UKEEditorGUI(tk.Tk):
     def _apply_settings(self, len_v, conv_v, comma_v, dlg):
         self.patient_code_len      = len_v.get()
         self.patient_code_conv_len = conv_v.get()
-        self.trailing_commas       = comma_v.get()
 
-        self.status.set(f"設定変更: "
-                        f"ハイライト桁数={self.patient_code_len} / "
-                        f"変換桁数={self.patient_code_conv_len} / "
-                        f"後方カンマ数={self.trailing_commas} / "
-                        f"枝番モード={self.br_mode.get()}")
-        self._apply_highlight()   # 再描画
+        # ★ 後方カンマを 1..MAX_TRAILING_COMMAS にクランプ
+        try:
+            tc = int(comma_v.get())
+        except Exception:
+            tc = self.trailing_commas
+        self.trailing_commas = max(1, min(MAX_TRAILING_COMMAS, tc))
+
+        self.status.set(
+            f"設定変更: ハイライト桁数={self.patient_code_len} / "
+            f"変換桁数={self.patient_code_conv_len} / "
+            f"後方カンマ数={self.trailing_commas} / 枝番モード={self.br_mode.get()}"
+        )
+        self._apply_highlight()
         dlg.destroy()
     
     def open_settings(self):
@@ -645,7 +654,7 @@ class UKEEditorGUI(tk.Tk):
 
         tk.Spinbox(dialog, from_=1, to=20, textvariable=len_var,  width=5).grid(row=0, column=1, padx=4)
         tk.Spinbox(dialog, from_=1, to=20, textvariable=conv_var, width=5).grid(row=1, column=1, padx=4)
-        tk.Spinbox(dialog, from_=1, to=5,  textvariable=comma_var,width=5).grid(row=2, column=1, padx=4)
+        tk.Spinbox(dialog, from_=1, to=MAX_TRAILING_COMMAS, textvariable=comma_var, width=5).grid(row=2, column=1, padx=4)
 
         # ── ★ 枝番関連 UI をここに内包 ★ ─────────
         sep = tk.Frame(dialog, height=2, bd=1, relief="sunken")

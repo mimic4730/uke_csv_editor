@@ -69,18 +69,25 @@ class Highlighter:
             self.allowed_code_lengths = None
 
     def _build_regex(self, n_digits: int, trailing_commas: int, detect_mode: int, custom_sym: str) -> re.Pattern:
-        charclass = r"[0-9\-]"
-
-        if detect_mode == 0:  # 後方カンマモード
+        if detect_mode == 0:  # 後方カンマ
             tc = "," * trailing_commas
-            lengths = self.allowed_code_lengths or [n_digits]  # ★許容桁セットがあれば使う
-            group = "|".join(rf"{charclass}{{{L}}}" for L in lengths)
+            base = self.base_code_len or n_digits
+            lengths = self.allowed_code_lengths or [n_digits]  # 例: [N, N+2]
+            alts = []
+            for L in lengths:
+                suf = L - base
+                if suf <= 0:
+                    alts.append(rf"\d{{{base}}}")              # N
+                else:
+                    alts.append(rf"\d{{{L}}}")                 # N+枝番（連結）
+                    if suf in (1, 2):
+                        alts.append(rf"\d{{{base}}}-\d{{{suf}}}")  # N-枝番（ハイフン）
+            group = "|".join(alts)
             return re.compile(rf",\s*({group})\s*{tc}")
-
-        # 任意記号モード（従来通り）
-        rng = f"{{1,{n_digits}}}"
-        sym = re.escape(custom_sym or "*")
-        return re.compile(rf",\s*({charclass}{rng})\s*{sym}")
+        else:
+            rng = f"{{1,{n_digits}}}"
+            sym = re.escape(custom_sym or "*")
+            return re.compile(rf",\s*(\d{rng}(?:-{1}\d{{1,2}})?)\s*{sym}")
 
     # ---------------- スキャン ----------------
     def scan(self, rows, display_indices, line_starts):
@@ -131,6 +138,7 @@ class Highlighter:
             search_from = re_iters[0].end()
             for m in self.regex.finditer(raw_line, search_from):
                 code = m.group(1)
+                norm = code.replace("-", "")
 
                 if detect_mode == 1 and "-" in code:
                     p_start = f"{line_no}.{m.start(1)}"
@@ -138,16 +146,25 @@ class Highlighter:
                     self.prefix_spans.append((p_start, p_end))
 
                 # 枝番着色
-                if self.branch_mode == 1 and base and len(code) == base + 1 and code[-1:] in self.br_1d:
-                    suf_ofs = len(code) - 1
-                    b_s = f"{line_no}.{m.start(1)+suf_ofs}"
-                    b_e = f"{line_no}.{m.start(1)+suf_ofs+1}"
-                    self.branch_spans.append((b_s, b_e))
-                elif self.branch_mode == 2 and base and len(code) == base + 2 and code[-2:] in self.br_2d:
-                    suf_ofs = len(code) - 2
-                    b_s = f"{line_no}.{m.start(1)+suf_ofs}"
-                    b_e = f"{line_no}.{m.start(1)+suf_ofs+2}"
-                    self.branch_spans.append((b_s, b_e))
+                if self.branch_mode == 1 and base and len(norm) == base + 1:
+                    if "-" in code and code.split("-",1)[1] in self.br_1d:
+                        b_s = f"{line_no}.{m.start(1) + code.find('-') + 1}"
+                        b_e = f"{line_no}.{m.start(1) + code.find('-') + 2}"
+                        self.branch_spans.append((b_s, b_e))
+                    elif code[-1:] in self.br_1d:
+                        b_s = f"{line_no}.{m.start(1) + base}"
+                        b_e = f"{line_no}.{m.start(1) + base + 1}"
+                        self.branch_spans.append((b_s, b_e))
+
+                elif self.branch_mode == 2 and base and len(norm) == base + 2:
+                    if "-" in code and code.split("-",1)[1] in self.br_2d:
+                        b_s = f"{line_no}.{m.start(1) + code.find('-') + 1}"
+                        b_e = f"{line_no}.{m.start(1) + code.find('-') + 3}"
+                        self.branch_spans.append((b_s, b_e))
+                    elif code[-2:] in self.br_2d:
+                        b_s = f"{line_no}.{m.start(1) + base}"
+                        b_e = f"{line_no}.{m.start(1) + base + 2}"
+                        self.branch_spans.append((b_s, b_e))
 
                 start = f"{line_no}.{m.start()}"
                 end   = f"{line_no}.{m.end()}"
