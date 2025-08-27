@@ -13,7 +13,7 @@ import converter
 
 DISPLAY_COL = 0   # フィルタ用列（先頭列）
 MAX_TRAILING_COMMAS = 30
-APP_VERSION = "v1.7.0"
+APP_VERSION = "v1.8.0"
 
 class UKEEditorGUI(tk.Tk):
     # ────────────────────────── 初期化 ──────────────────────────
@@ -522,22 +522,39 @@ class UKEEditorGUI(tk.Tk):
             for old, new, method in per_line_changes:
                 changes_rows.append([str(idx), old, new, line, fixed_line, method])
 
-        # ---- 変換後 UKE を保存 ----
+        # ---- 変換後 UKE の保存先をユーザーに聞く（Save As）----
         base = self.file_path
         assert base is not None
-        stem = re.sub(r'[^A-Za-z0-9]', '', base.stem) or "F"
-        stem = (stem[:1] + datetime.datetime.now().strftime("%y%m%d%H"))[:8]
-        out_path = base.with_name(stem.upper() + ".UKE")
 
+        # デフォルト候補（元ファイル名の前に「修正後_」を付ける）
+        default_name = f"修正後_{base.stem}.UKE"
+
+        save_path = filedialog.asksaveasfilename(
+            title="変換後UKEを保存",
+            initialdir=str(base.parent),
+            initialfile=default_name,
+            defaultextension=".UKE",
+            filetypes=[("UKE ファイル", "*.UKE"), ("すべてのファイル", "*.*")]
+        )
+        if not save_path:
+            messagebox.showinfo("保存を中止", "保存がキャンセルされました。")
+            return
+
+        out_path = Path(save_path)
+
+        # ---- UKE本体を書き出し（Shift-JIS/CRLF）----
         with out_path.open("w", encoding="cp932", newline="") as f:
             for L in out_lines:
                 f.write(f"{L}\r\n")
 
-        # ---- 変更ログCSVを保存（method列を追加）----
+        # ---- 変更ログCSV・集計ログは『選んだファイル名』基準で同じフォルダへ ----
+        out_dir = out_path.parent
+        out_stem = out_path.stem
+
         map_path = None
         try:
             if changes_rows:
-                map_path = base.with_name(f"{base.stem}_changes.csv")
+                map_path = out_dir / f"{out_stem}_changes.csv"
                 with map_path.open("w", encoding="cp932", newline="") as f:
                     writer = csv.writer(f, lineterminator="\r\n")
                     writer.writerow([
@@ -548,10 +565,9 @@ class UKEEditorGUI(tk.Tk):
         except Exception as e:
             messagebox.showwarning("警告", f"変更ログの保存に失敗しました: {e}")
 
-        # ---- 集計テキストログを保存 ----
-        unchanged_total = target_total - converted_total
+        # 集計テキストログ
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_path = base.with_name(f"{base.stem}_convert_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.log.txt")
+        log_path = out_dir / f"{out_stem}_convert_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.log.txt"
         try:
             with log_path.open("w", encoding="cp932", newline="") as f:
                 f.write("UKE CSV Editor Conversion Log\r\n")
@@ -578,8 +594,7 @@ class UKEEditorGUI(tk.Tk):
             f"\nログ: {log_path}"
         )
         messagebox.showinfo("完了", msg)
-        self.status.set(f"保存完了: {out_path.name}（変換 {converted_total}/{target_total} 件, Fallback {fallback_total} 件）")
-    
+        self.status.set(f"保存完了: {out_path.name}（変換 {converted_total}/{target_total} 件, Fallback {fallback_total} 件）")    
     # ---------- ファイルリネーム ----------
     def rename_files(self):
         # ……元の rename_files 実装をそのまま残す……
