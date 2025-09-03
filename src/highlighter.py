@@ -28,7 +28,8 @@ class Highlighter:
         self.br_1d: List[str] = []         # 登録済み枝番1桁
         self.br_2d: List[str] = []         # 登録済み枝番２桁
         self.base_code_len = None  # 初期桁数        
-        self.allowed_code_lengths: list[int] | None = None  # 許容桁数   
+        self.allowed_code_lengths: list[int] | None = None  # 許容桁数  
+        self.noise_marks: str | None = None 
         
         # (start, end, tag) -- tag は hit / single
         self.matches: List[Tuple[str, str, str]] = []
@@ -68,6 +69,10 @@ class Highlighter:
         else:
             self.allowed_code_lengths = None
 
+    def set_noise_marks(self, marks: str | None):
+        """任意記号モード等でコード直後に出現するノイズ（捨てる記号群）を設定"""
+        self.noise_marks = (marks or "").strip() or None
+
     def _build_regex(self, n_digits: int, trailing_commas: int, detect_mode: int, custom_sym: str) -> re.Pattern:
         if detect_mode == 0:  # 後方カンマ
             tc = "," * trailing_commas
@@ -83,11 +88,18 @@ class Highlighter:
                     if suf in (1, 2):
                         alts.append(rf"\d{{{base}}}-\d{{{suf}}}")  # N-枝番（ハイフン）
             group = "|".join(alts)
-            return re.compile(rf",\s*({group})\s*{tc}")
+            noise = ""
+            if self.noise_marks:
+                noise = rf"\s*(?P<noise>[" + re.escape(self.noise_marks) + r"]+)?"
+            return re.compile(rf",\s*(?P<code>(?:{group}))" + noise + rf"\s*{tc}")
         else:
             rng = f"{{1,{n_digits}}}"
             sym = re.escape(custom_sym or "*")
-            return re.compile(rf",\s*(\d{rng}(?:-{1}\d{{1,2}})?)\s*{sym}")
+            code_pat = rf"\d{rng}(?:-\d{{1,2}})?"
+            noise = ""
+            if self.noise_marks:
+                noise = rf"\s*(?P<noise>[" + re.escape(self.noise_marks) + r"]+)?"
+            return re.compile(rf",\s*(?P<code>{code_pat})" + noise + rf"\s*(?P<sym>{sym})")
 
     # ---------------- スキャン ----------------
     def scan(self, rows, display_indices, line_starts):
@@ -137,33 +149,34 @@ class Highlighter:
             # ★ 既存の患者コードスキャンは「先頭の RE 以降」を対象
             search_from = re_iters[0].end()
             for m in self.regex.finditer(raw_line, search_from):
-                code = m.group(1)
+                code = m.group('code') if ('code' in m.re.groupindex) else m.group(1)
+                code_start = m.start('code') if ('code' in m.re.groupindex) else m.start(1)
                 norm = code.replace("-", "")
 
                 if detect_mode == 1 and "-" in code:
-                    p_start = f"{line_no}.{m.start(1)}"
-                    p_end   = f"{line_no}.{m.start(1) + code.find('-')}"
+                    p_start = f"{line_no}.{code_start}"
+                    p_end   = f"{line_no}.{code_start + code.find('-')}"
                     self.prefix_spans.append((p_start, p_end))
 
                 # 枝番着色
                 if self.branch_mode == 1 and base and len(norm) == base + 1:
                     if "-" in code and code.split("-",1)[1] in self.br_1d:
-                        b_s = f"{line_no}.{m.start(1) + code.find('-') + 1}"
-                        b_e = f"{line_no}.{m.start(1) + code.find('-') + 2}"
+                        b_s = f"{line_no}.{code_start + code.find('-') + 1}"
+                        b_e = f"{line_no}.{code_start + code.find('-') + 2}"
                         self.branch_spans.append((b_s, b_e))
                     elif code[-1:] in self.br_1d:
-                        b_s = f"{line_no}.{m.start(1) + base}"
-                        b_e = f"{line_no}.{m.start(1) + base + 1}"
+                        b_s = f"{line_no}.{code_start + base}"
+                        b_e = f"{line_no}.{code_start + base + 1}"
                         self.branch_spans.append((b_s, b_e))
 
                 elif self.branch_mode == 2 and base and len(norm) == base + 2:
                     if "-" in code and code.split("-",1)[1] in self.br_2d:
-                        b_s = f"{line_no}.{m.start(1) + code.find('-') + 1}"
-                        b_e = f"{line_no}.{m.start(1) + code.find('-') + 3}"
+                        b_s = f"{line_no}.{code_start + code.find('-') + 1}"
+                        b_e = f"{line_no}.{code_start + code.find('-') + 3}"
                         self.branch_spans.append((b_s, b_e))
                     elif code[-2:] in self.br_2d:
-                        b_s = f"{line_no}.{m.start(1) + base}"
-                        b_e = f"{line_no}.{m.start(1) + base + 2}"
+                        b_s = f"{line_no}.{code_start + base}"
+                        b_e = f"{line_no}.{code_start + base + 2}"
                         self.branch_spans.append((b_s, b_e))
 
                 start = f"{line_no}.{m.start()}"
