@@ -210,7 +210,7 @@ class UKEEditorGUI(tk.Tk):
 
             for m in pat.finditer(tail):
                 try:
-                    code = m.group(1)
+                    code = m.group('code') if ('code' in m.re.groupindex) else m.group(1)
                 except IndexError:
                     code = m.group(0)
                 norm = code.replace("-", "")
@@ -292,6 +292,10 @@ class UKEEditorGUI(tk.Tk):
         else:
             self.hl.set_allowed_code_lengths(None)  # 任意記号モードは従来通り
 
+        # ノイズ記号は正規表現構築前に反映
+        if hasattr(self.hl, "set_noise_marks"):
+            self.hl.set_noise_marks(self.noise_marks)
+
         # ★許容桁セット後にパターンを構築する（順序が大事）
         pattern = self.hl._build_regex(
             n_digits=self.patient_code_len,
@@ -307,9 +311,6 @@ class UKEEditorGUI(tk.Tk):
             self.br_mode.get(),
             bm.list_suffixes(1), bm.list_suffixes(2)
         )
-        
-        if hasattr(self.hl, "set_noise_marks"):
-            self.hl.set_noise_marks(self.noise_marks)
 
     def highlight_all_matches(self):
         if not self.rows:
@@ -465,11 +466,16 @@ class UKEEditorGUI(tk.Tk):
         converted_total= 0          # 実際に値が変わった件数（normal + fallback）
         fallback_total = 0          # フォールバックが発動した件数
 
+        # カンマ数検証用
+        comma_mismatch_rows: list[tuple[int, int, int]] = []  # (line_no, before, after)
+
         # フォールバックで落とす桁（枝番モードに追随）
         fallback_drop = 2 if self.br_mode.get() == 2 else (1 if self.br_mode.get() == 1 else 0)
 
         for idx, row in enumerate(self.rows, 1):  # 行番号は1始まり
             line = ",".join(row)
+            # 元行のカンマ個数（検証用）
+            orig_commas = line.count(',')
 
             # 行内の RE を全件カウント（通常は1件想定だが念のため）
             re_all = list(RE_FIELD.finditer(line))
@@ -496,7 +502,7 @@ class UKEEditorGUI(tk.Tk):
 
             def _repl(m: re.Match) -> str:
                 nonlocal converted_total, fallback_total
-                old = m.group(1)
+                old = m.group('code') if ('code' in m.re.groupindex) else m.group(1)
                 new = self._format_code(old)   # 通常処理
                 method = "normal"
 
@@ -530,14 +536,18 @@ class UKEEditorGUI(tk.Tk):
             tail_fixed = pat.sub(_repl, tail)
             fixed_line = head + tail_fixed
             out_lines.append(fixed_line)
-            
-            
+
+            # カンマ数検証（変更が入った行のみ対象）
+            new_commas = fixed_line.count(',')
+            if new_commas != orig_commas:
+                comma_mismatch_rows.append((idx, orig_commas, new_commas))
 
             # 変更ログ（converted_line を確定させてからまとめて吐く）
             for old, new, method in per_line_changes:
                 changes_rows.append([str(idx), old, new, line, fixed_line, method])
 
         unchanged_total = max(0, target_total - converted_total)
+        comma_mismatch_total = len(comma_mismatch_rows)
         # ---- 変換後 UKE の保存先をユーザーに聞く（Save As）----
         base = self.file_path
         assert base is not None
@@ -610,6 +620,14 @@ class UKEEditorGUI(tk.Tk):
                 f.write(f"Regex Pattern      : {regex_pat}\r\n")
                 f.write(f"Scope              : RE以降のみ（最初のRE以降）\r\n")
                 f.write("===================================\r\n\r\n")
+                # === Validation: Comma Count Consistency ===
+                f.write("=== Validation (Comma Count Consistency) ===\r\n")
+                f.write(f"Mismatches        : {comma_mismatch_total}\r\n")
+                if comma_mismatch_total:
+                    # 上位20件だけ詳細表示
+                    for ln, before, after in comma_mismatch_rows[:20]:
+                        f.write(f" - Line {ln}: commas before={before}, after={after}\r\n")
+                f.write("\r\n")
                 # ===== ▲ ここまで設定情報を追記（新規） ▲ =====
 
                 f.write("UKE CSV Editor Conversion Log\r\n")
@@ -635,6 +653,10 @@ class UKEEditorGUI(tk.Tk):
             f"\nRE件数: {re_token_total} 件"
             f"\nログ: {log_path}"
         )
+        if comma_mismatch_total:
+            msg += f"\n⚠ カンマ数不一致: {comma_mismatch_total} 件（ログ参照）"
+        else:
+            msg += "\nカンマ数検証: OK"
         messagebox.showinfo("完了", msg)
         self.status.set(f"保存完了: {out_path.name}（変換 {converted_total}/{target_total} 件, Fallback {fallback_total} 件）")    
         
