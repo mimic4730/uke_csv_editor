@@ -10,10 +10,11 @@ import branch_manager as bm
 import highlighter
 from editor import load_csv, build_uke_output_path, build_log_paths
 import converter
+import reconcile_patient_codes as rpc
 
 DISPLAY_COL = 0   # フィルタ用列（先頭列）
 MAX_TRAILING_COMMAS = 30
-APP_VERSION = "v1.9.0"
+APP_VERSION = "v2.0.0"
 
 class UKEEditorGUI(tk.Tk):
     # ────────────────────────── 初期化 ──────────────────────────
@@ -73,6 +74,8 @@ class UKEEditorGUI(tk.Tk):
                                    self.filter_by_code(None))).grid(row=0, column=2, padx=4, sticky="w")
         tk.Button(f1, text="設定", width=18,
                   command=self.open_settings).grid(row=0, column=3, padx=4, sticky="w")
+        tk.Button(f1, text="患者コード照合（ログ×患者CSV）", width=28,
+              command=lambda: rpc.run_reconcile_dialog(self)).grid(row=0, column=4, padx=4, sticky="w")
 
         # 2段目（ハイライト）
         f2 = tk.Frame(self); f2.pack(pady=2, anchor="w")
@@ -841,6 +844,7 @@ class UKEEditorGUI(tk.Tk):
             "  6) 任意記号の扱い： 任意記号モード＝記号列は保持／後方カンマ＝個数で正規化\n"
             "  7) 捨てるマーク（ノイズ）： 設定で ‘*＊※★’ 等を指定。コード直後のノイズは除去\n"
             "  8) 保存名： ‘名前を付けて保存’ で出力ファイル名を指定可能（変更ログ/ログも同stem）\n"
+            "  9) カンマ数検証： 変換前後で行ごとのカンマ個数を自動チェック。結果はダイアログと *.log.txt に表示\n"
             "--------------------------------------------\n"
             "\n"
             "■ 重要：ハイライト用桁数（N）について\n"
@@ -854,7 +858,7 @@ class UKEEditorGUI(tk.Tk):
             "  2) ファイル読み込み           ： UKE/CSV を読み込みます。\n"
             "  3) 患者コード・全行ハイライト： RE 以降の患者コードを検出して色付け。\n"
             "  4) コード変換して保存         ： 変換して UKE を出力（名前を付けて保存可）、\n"
-            "                                    変更ログ/テキストログも保存。\n"
+            "                                    変更ログ/テキストログも保存（カンマ数検証も実施）。\n"
             "\n"
             "■ ハイライト（検出）\n"
             "  - コード全体 : 黄,   枝番 : 赤,   ハイフン前まで : 水色（任意記号モード時）\n"
@@ -872,6 +876,7 @@ class UKEEditorGUI(tk.Tk):
             "  - 第2段（フォールバック）： 第1段で不変かつ『数字のみ・長さが N+枝番桁』の場合に\n"
             "      末尾の枝番桁数を落としてから桁揃え（ハイフン付きは対象外）。\n"
             "  - モード差： 任意記号＝記号列保持／後方カンマ＝設定個数で正規化。\n"
+            "  - カンマ数検証： 置換後に行ごとのカンマ個数一致を検証し、異常はログへ警告。\n"
             "\n"
             "■ 設定のコツ\n"
             "  - 患者コード桁数（N） ： 枝番を除いた基準桁。\n"
