@@ -14,7 +14,7 @@ import reconcile_patient_codes as rpc
 
 DISPLAY_COL = 0   # フィルタ用列（先頭列）
 MAX_TRAILING_COMMAS = 30
-APP_VERSION = "v2.1.0"
+APP_VERSION = "v2.1.1"
 
 class UKEEditorGUI(tk.Tk):
     # ────────────────────────── 初期化 ──────────────────────────
@@ -761,13 +761,31 @@ class UKEEditorGUI(tk.Tk):
         dlg.title("手動桁数変換（RE未検出/マッチなし行）")
         dlg.transient(self); dlg.grab_set(); dlg.resizable(True, True)
 
+        # --- 幅キャップ：メインと同程度に抑える ----------------------------
+        try:
+            main_w = int(self.winfo_width())
+        except Exception:
+            main_w = 900
+        cap_w = max(860, min(main_w if main_w > 1 else 900, 1000))  # だいたいメイン幅（900）±少し
+        dlg.minsize(720, 420)
+        dlg.maxsize(cap_w, self.winfo_screenheight() - 80)
+        # 初期サイズもここで縛る（高さは適宜）
+        dlg.geometry(f"{cap_w}x{min(600, self.winfo_screenheight()-160)}+{self.winfo_rootx()+40}+{self.winfo_rooty()+40}")
+
+        def _cap_dialog_width():
+            """再描画等で広がりそうになっても、幅の上限に収める"""
+            dlg.update_idletasks()
+            cur_h = dlg.winfo_height() or 600
+            if dlg.winfo_width() > cap_w:
+                dlg.geometry(f"{cap_w}x{cur_h}")
+
         info = (
             f"対象行: NO_RE={len(candidates_no_re)} / RE_BUT_NO_MATCH={len(candidates_re_nomatch)} / UNCHANGED_SAME_LEN={len(candidates_same_len)}\n"
                 "列見出しクリック＝全体の対象列、セルのダブルクリック＝行別の対象列を指定できます。"
             )
         ttk.Label(dlg, text=info, justify="left").pack(anchor="w", padx=12, pady=(12, 4))
 
-        # オプション列
+        # オプション
         opts = ttk.Frame(dlg); opts.pack(fill="x", padx=12)
         use_no_re   = tk.BooleanVar(value=False)
         use_nomatch = tk.BooleanVar(value=bool(candidates_re_nomatch))
@@ -784,6 +802,9 @@ class UKEEditorGUI(tk.Tk):
         # 表本体
         table_frame = ttk.Frame(dlg)
         table_frame.pack(fill="both", expand=True, padx=12, pady=(6, 0))
+        # 子ウィジェット（Treeview）の推奨サイズで親フレームが膨張しないように
+        table_frame.pack_propagate(False)
+        table_frame.configure(width=cap_w - 24)  # padding を差し引いて概ねダイアログ幅に合わせる        
 
         tree = ttk.Treeview(table_frame, show="headings")
         ysb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
@@ -796,7 +817,7 @@ class UKEEditorGUI(tk.Tk):
         table_frame.columnconfigure(0, weight=1)
 
         # プレビュー
-        prev = tk.Text(dlg, height=10, width=100, wrap="none")
+        prev = tk.Text(dlg, height=10, wrap="none")
         prev.pack(fill="both", expand=False, padx=12, pady=(8, 0))
         prev.config(state="disabled")
 
@@ -863,6 +884,7 @@ class UKEEditorGUI(tk.Tk):
 
             # プレビュー更新
             _preview_topN()
+            _cap_dialog_width()
 
         def _refresh_heading_selected():
             # 見出しの ★ 印を付け替え
@@ -960,6 +982,7 @@ class UKEEditorGUI(tk.Tk):
             total_skipped   += skipped
             status_var.set(f"直近: 変換 {converted} / スキップ {skipped}   累計: 変換 {total_converted} / スキップ {total_skipped}")
             _rebuild_table()   # __target__ 等の表示更新
+            _cap_dialog_width()
 
         def _target_col_for_row(ln: int) -> Optional[int]:
             # 行別指定があれば優先、なければ全体選択列、どちらも無ければ None
@@ -970,6 +993,7 @@ class UKEEditorGUI(tk.Tk):
         # 再描画とプレビュー
         def _on_filter_change(*_):
             _rebuild_table()
+            _cap_dialog_width()
 
         use_no_re.trace_add("write", _on_filter_change)
         use_nomatch.trace_add("write", _on_filter_change)
