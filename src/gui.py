@@ -1,6 +1,6 @@
 # src/gui.py
 import datetime, re, tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from pathlib import Path
 from typing import List, Optional
 import json
@@ -8,13 +8,13 @@ import csv
 
 import branch_manager as bm
 import highlighter
-from editor import load_csv, build_uke_output_path, build_log_paths
+from editor import load_csv
 import converter
 import reconcile_patient_codes as rpc
 
 DISPLAY_COL = 0   # フィルタ用列（先頭列）
 MAX_TRAILING_COMMAS = 30
-APP_VERSION = "v2.0.0"
+APP_VERSION = "v2.1.0"
 
 class UKEEditorGUI(tk.Tk):
     # ────────────────────────── 初期化 ──────────────────────────
@@ -468,6 +468,13 @@ class UKEEditorGUI(tk.Tk):
         target_total   = 0          # 変換対象（RE以降でパターンにヒット）件数
         converted_total= 0          # 実際に値が変わった件数（normal + fallback）
         fallback_total = 0          # フォールバックが発動した件数
+        # 未変換理由の分類カウンタ
+        unchanged_same_len_rows: list[tuple[int, str]] = []   # (line_no, original_line)
+        unchanged_same_len_seen: set[int] = set()             # 重複登録防止
+        no_re_rows: list[tuple[int, str]] = []                # (line_no, original_line)
+        re_nomatch_rows: list[tuple[int, str]] = []           # (line_no, original_line)
+        manual_converted_total = 0
+        manual_skipped_total = 0
 
         # カンマ数検証用
         comma_mismatch_rows: list[tuple[int, int, int]] = []  # (line_no, before, after)
@@ -488,6 +495,7 @@ class UKEEditorGUI(tk.Tk):
             m_re = re_all[0] if re_all else None
             if not m_re:
                 out_lines.append(line)
+                no_re_rows.append((idx, line))
                 continue
 
             head = line[:m_re.end()]         # REまで（含む）
@@ -498,6 +506,7 @@ class UKEEditorGUI(tk.Tk):
             target_total += len(matches)
             if not matches:
                 out_lines.append(line)
+                re_nomatch_rows.append((idx, line))
                 continue
 
             # この行の変更記録（置換後に fixed_line を付けてCSVに書く）
@@ -523,6 +532,14 @@ class UKEEditorGUI(tk.Tk):
 
                 if new != old:
                     converted_total += 1
+                else:
+                    # 旧→新が同一（normal時）。“元と変換後の桁数が一致”の代表ケースとして記録
+                    try:
+                        if old.isdigit() and len(old) == self.patient_code_conv_len and idx not in unchanged_same_len_seen:
+                            unchanged_same_len_rows.append((idx, line))  # 行全体を保存
+                            unchanged_same_len_seen.add(idx)
+                    except Exception:
+                        pass             
 
                 per_line_changes.append((old, new, method))
                 if self.detect_mode.get() == 1:
@@ -550,6 +567,30 @@ class UKEEditorGUI(tk.Tk):
                 changes_rows.append([str(idx), old, new, line, fixed_line, method])
 
         unchanged_total = max(0, target_total - converted_total)
+        
+        # --- 必要なら手動変換ダイアログを起動 ---
+        # 条件: (1) RE以降で検出した対象に未変換が残っている  or  (2) REはあるが正規表現にマッチしなかった行がある
+        should_open_manual = (converted_total < target_total) or bool(re_nomatch_rows)
+
+        if should_open_manual:
+            messagebox.showinfo(
+                "未変換データの検出",
+                f"RE未検出: {len(no_re_rows)} 行 / REありマッチなし: {len(re_nomatch_rows)} 行 / 同桁未変換: {len(unchanged_same_len_rows)} 行\n"
+                "手動桁数変換ダイアログを開きます。",
+                parent=self
+            )
+            mc, ms = self._manual_convert_dialog(
+                candidates_no_re=no_re_rows,              # NO_RE はダイアログ側デフォルト OFF のまま渡す
+                candidates_re_nomatch=re_nomatch_rows,
+                candidates_same_len=unchanged_same_len_rows,
+                out_lines=out_lines,
+                changes_rows=changes_rows
+            )
+            manual_converted_total += mc
+            manual_skipped_total += ms
+        # else: すべて変換済み（かつ RE無マッチなし）なのでダイアログは開かない
+
+        
         comma_mismatch_total = len(comma_mismatch_rows)
         # ---- 変換後 UKE の保存先をユーザーに聞く（Save As）----
         base = self.file_path
@@ -599,7 +640,7 @@ class UKEEditorGUI(tk.Tk):
         log_path = out_dir / f"{out_stem}_convert_{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.log.txt"
         try:
             with log_path.open("w", encoding="cp932", newline="") as f:
-                # ===== ▼ ここから設定情報を追記（新規） ▼ =====
+                # ===== ▼ ここから設定情報を追記 ▼ =====
                 detect_mode = self.detect_mode.get()
                 detect_label = "後方カンマ" if detect_mode == 0 else "任意の記号"
                 branch_label = self._branch_mode_label()
@@ -631,8 +672,6 @@ class UKEEditorGUI(tk.Tk):
                     for ln, before, after in comma_mismatch_rows[:20]:
                         f.write(f" - Line {ln}: commas before={before}, after={after}\r\n")
                 f.write("\r\n")
-                # ===== ▲ ここまで設定情報を追記（新規） ▲ =====
-
                 f.write("UKE CSV Editor Conversion Log\r\n")
                 f.write(f"Timestamp           : {ts}\r\n")
                 f.write(f"Source file         : {self.file_path.name}\r\n")
@@ -641,6 +680,16 @@ class UKEEditorGUI(tk.Tk):
                 f.write(f"変換した件数        : {converted_total}\r\n")
                 f.write(f"フォールバック件数  : {fallback_total}\r\n")
                 f.write(f"変換できなかった件数: {unchanged_total}\r\n")
+                # 追加: 未変換理由と手動救済の内訳
+                f.write("\r\n=== Unconverted Breakdown ===\r\n")
+                f.write(f"UNCHANGED_SAME_LEN  : {len(unchanged_same_len_rows)}\r\n")
+                f.write(f"NO_RE               : {len(no_re_rows)}\r\n")
+                f.write(f"RE_BUT_NO_MATCH     : {len(re_nomatch_rows)}\r\n")
+                if manual_converted_total or manual_skipped_total:
+                    f.write("\r\n=== Manual Fix Summary ===\r\n")
+                    f.write(f"Manual Converted    : {manual_converted_total}\r\n")
+                    f.write(f"Manual Skipped      : {manual_skipped_total}\r\n")                
+
         except Exception as e:
             messagebox.showwarning("警告", f"テキストログの保存に失敗しました: {e}")
 
@@ -656,13 +705,297 @@ class UKEEditorGUI(tk.Tk):
             f"\nRE件数: {re_token_total} 件"
             f"\nログ: {log_path}"
         )
+        extra = []
+        if unchanged_total or no_re_rows or re_nomatch_rows or manual_converted_total:
+            extra.append("\n―― 未変換/手動変換 内訳 ――")
+            extra.append(f"  ・UNCHANGED_SAME_LEN（同桁無変化）: {len(unchanged_same_len_rows)} 件")
+            extra.append(f"  ・NO_RE（RE未検出）               : {len(no_re_rows)} 行")
+            extra.append(f"  ・RE_BUT_NO_MATCH（REあり無マッチ）: {len(re_nomatch_rows)} 行")
+            if manual_converted_total:
+                extra.append(f"  ・手動桁数変換で救済             : {manual_converted_total} 行（スキップ {manual_skipped_total}）")
+        if extra:
+            msg += "\n" + "\n".join(extra)        
+        
         if comma_mismatch_total:
             msg += f"\n⚠ カンマ数不一致: {comma_mismatch_total} 件（ログ参照）"
         else:
             msg += "\nカンマ数検証: OK"
         messagebox.showinfo("完了", msg)
-        self.status.set(f"保存完了: {out_path.name}（変換 {converted_total}/{target_total} 件, Fallback {fallback_total} 件）")    
-        
+        self.status.set(f"保存完了: {out_path.name}（自動 {converted_total}/{target_total} 件, 手動 {manual_converted_total} 件, Fallback {fallback_total} 件）")
+
+    def _manual_convert_dialog(self, *,
+                            candidates_no_re: list[tuple[int, str]],
+                            candidates_re_nomatch: list[tuple[int, str]] | None = None,
+                            candidates_same_len: list[tuple[int, str]] | None = None,
+                            out_lines: list[str],
+                            changes_rows: list[list[str]]) -> tuple[int, int]:
+        """
+        返戻等でRE起因の未変換行を「レコード表示」し、列見出しクリック/セルダブルクリックで
+        変換対象列を選んで一括変換する。
+        - candidates_* は (line_no(1始まり), original_line) のリスト
+        - out_lines に対して行単位で置換を反映
+        - changes_rows に method='manual' で追記
+        戻り値: (manual_converted, manual_skipped)
+        """
+        if candidates_re_nomatch is None:
+            candidates_re_nomatch = []
+        if candidates_same_len is None:
+            candidates_same_len = []
+            
+        # 変換桁数は起動時スナップショット（他設定は引き継がない）
+        conv_len = int(self.patient_code_conv_len)
+        # 行別の対象列（0始まり for C1..）：{ line_no -> col_idx }
+        overrides: dict[int, int] = {}
+        # 複数回実行に備えて累計カウンタ
+        total_converted = 0
+        total_skipped = 0
+            
+        pool = [("NO_RE", ln, line) for ln, line in candidates_no_re] + \
+            [("RE_BUT_NO_MATCH", ln, line) for ln, line in candidates_re_nomatch] + \
+            [("UNCHANGED_SAME_LEN", ln, line) for ln, line in candidates_same_len]
+        if not pool:
+            return (0, 0)
+
+        # ---- UI ----
+        dlg = tk.Toplevel(self)
+        dlg.title("手動桁数変換（RE未検出/マッチなし行）")
+        dlg.transient(self); dlg.grab_set(); dlg.resizable(True, True)
+
+        info = (
+            f"対象行: NO_RE={len(candidates_no_re)} / RE_BUT_NO_MATCH={len(candidates_re_nomatch)} / UNCHANGED_SAME_LEN={len(candidates_same_len)}\n"
+                "列見出しクリック＝全体の対象列、セルのダブルクリック＝行別の対象列を指定できます。"
+            )
+        ttk.Label(dlg, text=info, justify="left").pack(anchor="w", padx=12, pady=(12, 4))
+
+        # オプション列
+        opts = ttk.Frame(dlg); opts.pack(fill="x", padx=12)
+        use_no_re   = tk.BooleanVar(value=False)
+        use_nomatch = tk.BooleanVar(value=bool(candidates_re_nomatch))
+        use_same    = tk.BooleanVar(value=False)
+        only_selected = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opts, text="NO_RE を含める", variable=use_no_re).grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Checkbutton(opts, text="RE_BUT_NO_MATCH を含める", variable=use_nomatch).grid(row=0, column=1, sticky="w", pady=2)
+        ttk.Checkbutton(opts, text="UNCHANGED_SAME_LEN を含める", variable=use_same).grid(row=0, column=2, sticky="w", pady=2)
+        ttk.Checkbutton(opts, text="選択行のみ変換", variable=only_selected).grid(row=0, column=3, sticky="w", pady=2)
+        ttk.Label(opts, text=f"この手動変換は 変換桁数={conv_len} で実行します").grid(row=1, column=0, columnspan=4, sticky="w", pady=(4,2))
+        status_var = tk.StringVar(value="未実行")
+        ttk.Label(opts, textvariable=status_var).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0,2))        
+
+        # 表本体
+        table_frame = ttk.Frame(dlg)
+        table_frame.pack(fill="both", expand=True, padx=12, pady=(6, 0))
+
+        tree = ttk.Treeview(table_frame, show="headings")
+        ysb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        xsb = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns")
+        xsb.grid(row=1, column=0, sticky="ew")
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+
+        # プレビュー
+        prev = tk.Text(dlg, height=10, width=100, wrap="none")
+        prev.pack(fill="both", expand=False, padx=12, pady=(8, 0))
+        prev.config(state="disabled")
+
+        # 内部状態
+        selected_col_idx: Optional[int] = None  # 0始まり（C1=0）
+        visible_rows: list[tuple[str, int, str, list[str]]] = []  # (tag, ln, orig_line, fields)
+        max_cols = 0
+        selected_header_marker = "★"  # 視覚化用
+
+        def _split_fields(line: str) -> list[str]:
+            # 既存実装に合わせて単純 split。UKEは値内カンマを持たない想定。
+            return line.split(",")
+
+        def _rebuild_table():
+            nonlocal visible_rows, max_cols, selected_col_idx
+            # フィルタ
+            filtered = []
+            for tag, ln, orig in pool:
+                if tag == "NO_RE" and not use_no_re.get():
+                    continue
+                if tag == "RE_BUT_NO_MATCH" and not use_nomatch.get():
+                    continue
+                if tag == "UNCHANGED_SAME_LEN" and not use_same.get():
+                    continue
+                fields = _split_fields(orig)
+                filtered.append((tag, ln, orig, fields))
+
+            visible_rows = filtered
+            max_cols = max((len(r[3]) for r in visible_rows), default=0)
+
+            # columns 定義（行番号/種別 + C1..Ck）
+            cols = ["__line__", "__type__", "__target__"] + [f"C{i}" for i in range(1, max_cols + 1)]
+            tree["columns"] = cols
+            for c in cols:
+                tree.heading(c, text="")  # リセット
+
+            # 見出し
+            tree.heading("__line__", text="行")
+            tree.heading("__type__", text="種別")
+            tree.heading("__target__", text="対象列")
+            tree.column("__target__", width=80, stretch=False)            
+            for i in range(1, max_cols + 1):
+                col_id = f"C{i}"
+                # 見出しクリックで選択列に設定
+                tree.heading(col_id, text=f"{i}", command=lambda c=i: _select_column(c - 1))
+                tree.column(col_id, width=90, stretch=True)
+            tree.column("__line__", width=60, stretch=False)
+            tree.column("__type__", width=130, stretch=False)
+
+            # 既存データクリア
+            for iid in tree.get_children():
+                tree.delete(iid)
+
+            # 行投入
+            def _target_text(ln: int) -> str:
+                return f"C{overrides[ln]+1}" if ln in overrides else "-"
+            for tag, ln, orig, fields in visible_rows:
+                row_vals = [ln, tag, _target_text(ln)] + [fields[i] if i < len(fields) else "" for i in range(max_cols)]
+
+                tree.insert("", "end", iid=str(ln), values=row_vals)
+
+            # 見出しの選択状態を再描画
+            _refresh_heading_selected()
+
+            # プレビュー更新
+            _preview_topN()
+
+        def _refresh_heading_selected():
+            # 見出しの ★ 印を付け替え
+            for i in range(1, max_cols + 1):
+                label = f"{i}"
+                if selected_col_idx is not None and i - 1 == selected_col_idx:
+                    label = f"{selected_header_marker}{label}"
+                tree.heading(f"C{i}", text=label)
+
+        def _set_preview_text(lines: list[str]):
+            prev.config(state="normal"); prev.delete("1.0", "end")
+            prev.insert("1.0", "\n".join(lines) if lines else "（プレビュー対象なし）")
+            prev.config(state="disabled")
+
+        def _preview_topN():
+            # 選択列に対して上位20件の before->after を出す
+            if selected_col_idx is None:
+                _set_preview_text(["変換対象列が未選択です。列見出しをクリック、またはセルをダブルクリックしてください。"])
+                return
+            lines = []
+            target = _get_apply_rows()
+            for tag, ln, orig, fields in target[:20]:
+                tcol = _target_col_for_row(ln)
+                if tcol is None or tcol < 0 or tcol >= len(fields):
+                    lines.append(f"[{tag}] 行{ln}: 対象列未指定のためスキップ")
+                    continue
+                old = fields[tcol]
+                digits = "".join(ch for ch in old if ch.isdigit())
+                new = digits[-conv_len:].zfill(conv_len) if digits else ""
+                lines.append(f"[{tag}] 行{ln} (C{tcol+1}): [{old}] -> [{new}]")
+            _set_preview_text(lines)
+
+        def _get_apply_rows():
+            # 変換対象の行（「選択行のみ変換」の場合はTreeview選択行）
+            if not only_selected.get():
+                return visible_rows
+            sel_ids = set(tree.selection())
+            return [row for row in visible_rows if str(row[1]) in sel_ids]
+
+        def _select_column(col_idx_zero_based: int):
+            nonlocal selected_col_idx
+            selected_col_idx = col_idx_zero_based
+            _refresh_heading_selected()
+            _preview_topN()
+
+        def _on_cell_double_click(event):
+            # ダブルクリックしたセルの列から選択列を決定
+            region = tree.identify("region", event.x, event.y)
+            if region != "cell" and region != "tree":
+                return
+            col = tree.identify_column(event.x)  # e.g. '#1', '#2', ...
+            row_iid = tree.identify_row(event.y)  # 行の iid（= line_no 文字列）
+            try:
+                col_index = int(col.lstrip("#")) - 1  # 0始まり
+            except Exception:
+                return
+            if not row_iid:
+                return
+            # columns: __line__(0), __type__(1), __target__(2), C1.. が 3 以降
+            if col_index >= 3:
+                # 行別の対象列を設定（0始まり for C1..）
+                ln = int(row_iid)
+                overrides[ln] = col_index - 3
+                tree.set(row_iid, "__target__", f"C{overrides[ln]+1}")
+                _preview_topN()
+            elif col_index >= 0:
+                # ヘッダ相当のダブルクリックではなく行の __line__/__type__/__target__ を触った場合は何もしない
+                return
+
+        tree.bind("<Double-1>", _on_cell_double_click)
+
+        def _apply():
+            # 実変換（out_lines & changes_rows を更新）
+            converted = skipped = 0
+            for tag, ln, orig, fields in _get_apply_rows():
+                tcol = _target_col_for_row(ln)
+                if tcol is None or tcol < 0 or tcol >= len(fields):
+                    skipped += 1
+                    continue
+                old = fields[tcol]
+                digits = "".join(ch for ch in old if ch.isdigit())
+                if not digits:
+                    skipped += 1
+                    continue
+                new_code = digits[-conv_len:].zfill(conv_len)
+                if new_code != old:
+                    fields[tcol] = new_code
+                    new_line = ",".join(fields)
+                    out_lines[ln - 1] = new_line  # 1始まり→0始まり
+                    changes_rows.append([str(ln), old, new_code, orig, new_line, f"manual(C{tcol+1})"])
+                    converted += 1
+            # 累計更新＆表示。ダイアログは閉じずに続けて操作できる
+            nonlocal total_converted, total_skipped
+            total_converted += converted
+            total_skipped   += skipped
+            status_var.set(f"直近: 変換 {converted} / スキップ {skipped}   累計: 変換 {total_converted} / スキップ {total_skipped}")
+            _rebuild_table()   # __target__ 等の表示更新
+
+        def _target_col_for_row(ln: int) -> Optional[int]:
+            # 行別指定があれば優先、なければ全体選択列、どちらも無ければ None
+            if ln in overrides:
+                return overrides[ln]
+            return selected_col_idx
+
+        # 再描画とプレビュー
+        def _on_filter_change(*_):
+            _rebuild_table()
+
+        use_no_re.trace_add("write", _on_filter_change)
+        use_nomatch.trace_add("write", _on_filter_change)
+        use_same.trace_add("write", _on_filter_change)
+
+        # ボタン
+        btns = ttk.Frame(dlg); btns.pack(fill="x", padx=12, pady=8)
+        def _reset_overrides():
+            overrides.clear()
+            status_var.set("行別指定をリセットしました")
+            _rebuild_table()
+
+        def _finish():
+            dlg.result = (total_converted, total_skipped)
+            dlg.grab_release(); dlg.destroy()
+
+        ttk.Button(btns, text="プレビュー更新", command=_preview_topN).pack(side="left")
+        ttk.Button(btns, text="行別指定リセット", command=_reset_overrides).pack(side="left", padx=(8,0))
+        ttk.Button(btns, text="実行", command=_apply).pack(side="right")
+        ttk.Button(btns, text="閉じる", command=_finish).pack(side="right", padx=(8,0))
+
+        # 初期構築
+        _rebuild_table()
+        dlg.wait_window()
+        return getattr(dlg, "result", (0, 0))
+
     # ---------- ファイルリネーム ----------
     def rename_files(self):
         # ……元の rename_files 実装をそのまま残す……
@@ -831,7 +1164,7 @@ class UKEEditorGUI(tk.Tk):
         self.destroy()
 
     def _insert_help_text(self):
-        """起動時にテキストボックスへ簡易ヘルプを表示（v1.9系 Tips付き）"""
+        """起動時にテキストボックスへ簡易ヘルプを表示（v2.1系仕様）"""
         HELP_TEXT = (
             f"UKE CSV Editor {APP_VERSION} - 使い方ガイド\n"
             "============================================\n"
@@ -839,57 +1172,63 @@ class UKEEditorGUI(tk.Tk):
             "  1) 長い桁から順に変換： 5桁 → 4桁 → 3桁 → 2桁（誤ヒット最小化）\n"
             "  2) yyyymmdd 回避： 後方カンマ数を十分大きく設定（例: 8, 10, 15 など）\n"
             "  3) ハイフン枝番： ‘-02’ 入力→保存は ‘02’ に正規化。登録済みなら左側を採用\n"
-            "  4) 変換対象は RE 以降 × ハイライト一致のみ（画面の黄色＝置換対象）\n"
-            "  5) 枝番は N+枝番桁の時だけ扱う（N桁末尾一致は枝番とみなさない）\n"
-            "  6) 任意記号の扱い： 任意記号モード＝記号列は保持／後方カンマ＝個数で正規化\n"
-            "  7) 捨てるマーク（ノイズ）： 設定で ‘*＊※★’ 等を指定。コード直後のノイズは除去\n"
-            "  8) 保存名： ‘名前を付けて保存’ で出力ファイル名を指定可能（変更ログ/ログも同stem）\n"
-            "  9) カンマ数検証： 変換前後で行ごとのカンマ個数を自動チェック。結果はダイアログと *.log.txt に表示\n"
+            "  4) 変換対象は「行内の最初の RE 以降」×「ハイライト一致のみ」（画面の黄色＝置換対象）\n"
+            "  5) 枝番は N+枝番桁のときだけ扱う（N桁末尾一致は枝番とみなさない）\n"
+            "  6) 任意記号モード：記号列は保持／後方カンマモード：カンマ個数で正規化\n"
+            "  7) 捨てるマーク（ノイズ）：設定で ‘*＊※★’ 等を指定。コード直後のノイズは自動除去\n"
+            "  8) 保存名：『名前を付けて保存』で出力名を指定（変更ログ/テキストログも同じファイル名stem）\n"
+            "  9) カンマ数検証：変換前後で行ごとのカンマ個数を自動チェック。結果はダイアログと *.log.txt に出力\n"
+            " 10) 手動桁数変換：自動処理後に未処理がある場合のみ起動（詳細は下記）\n"
             "--------------------------------------------\n"
             "\n"
-            "■ 重要：ハイライト用桁数（N）について\n"
-            "  - ハイライト用桁数は『枝番を除いた基準桁（N）』です。\n"
+            "■ ハイライトの基準（N=ハイライト用桁数）\n"
+            "  - N は『枝番を除いた基準桁』です。\n"
             "  - 後方カンマモードでは検出時に {N, N+枝番桁} を許容\n"
             "    （例：N=8/枝番2桁 → {8,10}。ハイフン形 8桁-2桁 もヒット）。\n"
             "  - 枝番の赤塗り／枝番除去／フォールバックは、長さが N+枝番桁 の時だけ適用。\n"
             "\n"
             "■ 基本の流れ\n"
-            "  1) 読み込みファイルをリネーム： 選んだ .UKE のファイル名を整えます。\n"
-            "  2) ファイル読み込み           ： UKE/CSV を読み込みます。\n"
-            "  3) 患者コード・全行ハイライト： RE 以降の患者コードを検出して色付け。\n"
-            "  4) コード変換して保存         ： 変換して UKE を出力（名前を付けて保存可）、\n"
-            "                                    変更ログ/テキストログも保存（カンマ数検証も実施）。\n"
-            "\n"
-            "■ ハイライト（検出）\n"
-            "  - コード全体 : 黄,   枝番 : 赤,   ハイフン前まで : 水色（任意記号モード時）\n"
-            "  - ステータスバー： RE統計（REあり/なし/個数）＋枝番統計（登録数/ヒット/モード）を表示。\n"
-            "  - 操作       ： 先頭1件 / 次の行へ / ハイライト解除\n"
+            "  1) 読み込みファイルをリネーム：選んだ .UKE のファイル名を整えます。\n"
+            "  2) ファイル読み込み          ：UKE/CSV を読み込みます。\n"
+            "  3) 患者コード・全行ハイライト：RE 以降の患者コードを検出して色付け。\n"
+            "  4) コード変換して保存        ：変換して UKE を出力（変更ログ/テキストログも保存）。\n"
             "\n"
             "■ 枝番（サフィックス）管理\n"
-            "  - 上部パネルに『登録済み枝番（1桁/2桁）』を常時表示。\n"
-            "  - 枝番登録   ： Ctrl+B、または『設定→枝番登録』。入力は 0〜99 または -0〜-99。\n"
-            "                  ※ 保存は数値のみ（-02 → 02 に正規化）。\n"
-            "  - 枝番処理   ： オフ / 1桁除去 / 2桁除去（設定で切替）。\n"
+            "  - 上部パネルで『登録済み枝番（1桁/2桁）』を常時表示。\n"
+            "  - 枝番登録   ：Ctrl+B または『設定→枝番登録』。入力は 0〜99 または -0〜-99。\n"
+            "                 ※ 保存は数値のみ（-02 → 02 に正規化）。\n"
+            "  - 枝番処理   ：オフ / 1桁除去 / 2桁除去（設定で切替）。\n"
             "\n"
-            "■ 変換（保存時の処理）\n"
-            "  - 第1段（通常）： 登録枝番を考慮して枝番を除去 → 指定桁数に整形。\n"
-            "  - 第2段（フォールバック）： 第1段で不変かつ『数字のみ・長さが N+枝番桁』の場合に\n"
-            "      末尾の枝番桁数を落としてから桁揃え（ハイフン付きは対象外）。\n"
-            "  - モード差： 任意記号＝記号列保持／後方カンマ＝設定個数で正規化。\n"
-            "  - カンマ数検証： 置換後に行ごとのカンマ個数一致を検証し、異常はログへ警告。\n"
+            "■ 保存時の自動変換ロジック\n"
+            "  - 第1段（通常）：登録枝番を考慮して枝番を除去 → 指定桁数（変換桁数）に整形。\n"
+            "  - 第2段（フォールバック）：第1段で不変かつ『数字のみ・長さ=N+枝番桁』の場合、\n"
+            "     末尾の枝番桁を落としてから桁揃え（ハイフン付きは対象外）。\n"
+            "  - カンマ数検証：置換後に行ごとのカンマ個数一致を検証し、異常はログへ警告。\n"
             "\n"
-            "■ 設定のコツ\n"
-            "  - 患者コード桁数（N） ： 枝番を除いた基準桁。\n"
-            "  - 患者コード変換桁数  ： 保存時の桁。長い→左カット／短い→左0埋め。\n"
-            "  - 後方カンマ数        ： 誤検出が多いほど大きく（最大 30 まで設定可）。\n"
-            "  - 任意記号モード      ： 特殊データで誤検出が出る時に一時的に活用。\n"
-            "  - 捨てるマーク        ： ‘*＊※★’ 等を設定 → コード直後のノイズは自動除去。\n"
+            "■ 手動桁数変換ダイアログ（未処理がある場合のみ自動起動）\n"
+            "  - 起動条件：\n"
+            "     (a) 自動処理の『変換対象件数 > 変換件数』、または\n"
+            "     (b) RE はあるが正規表現にヒットしなかった行（RE_BUT_NO_MATCH）が存在。\n"
+            "     ※ NO_RE（行内に RE 自体が無い）『だけ』の場合は自動起動しません。\n"
+            "  - 初期状態：RE_BUT_NO_MATCH=ON／NO_RE=OFF／UNCHANGED_SAME_LEN=OFF。\n"
+            "  - 操作：\n"
+            "     ・見出しクリック…全体の対象列を設定（C1, C2 …）\n"
+            "     ・セルをダブルクリック…その行だけの対象列を上書き指定（行別指定）\n"
+            "     ・『選択行のみ変換』…Treeで選択した行だけを対象に実行\n"
+            "     ・『行別指定リセット』…行別の列指定を全クリア\n"
+            "     ・ダイアログは閉じずに何度でも『実行』可能（直近/累計件数を表示）\n"
+            "  - 仕様：手動変換は『数字抽出→右端 変換桁数 → 左0埋め』のみを行い、\n"
+            "          枝番モード・検出モード・後方カンマ数・ノイズ設定の影響は受けません。\n"
+            "  - ログ：変更ログCSVの method は『manual(Cx)』形式で列を記録。\n"
+            "\n"
+            "■ 参考：ステータスバー\n"
+            "  - RE統計（REあり/なし/個数）と、枝番統計（登録数/ヒット/モード）を表示します。\n"
             "\n"
             "■ 例：N=8, 枝番2桁, 変換桁数=6, 後方カンマ数=8\n"
-            "  - ',00071843-02,,'           → 登録『02』あり → 左側 00071843 → 071843（6桁）\n"
-            "  - ',0007184302,,'            → 登録『02』あり → 00071843 → 071843（6桁）\n"
-            "  - ',00071843-02****,,,,,'    → ノイズ ‘****’ は除去、カンマ列は保持\n"
-            "  - ',20250131,,'              → 後方カンマ数が合わなければヒットせず変換対象外\n"
+            "  - ',00071843-02,,'         → 登録『02』あり → 左側 00071843 → 071843（6桁）\n"
+            "  - ',0007184302,,'          → 登録『02』あり → 00071843 → 071843（6桁）\n"
+            "  - ',00071843-02****,,,,,'  → ノイズ ‘****’ は除去、カンマ列は保持\n"
+            "  - ',20250131,,'            → 後方カンマ数が合わなければヒットせず変換対象外\n"
         )
         self.row_text.config(state="normal")
         self.row_text.delete("1.0", "end")
